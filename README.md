@@ -38,6 +38,7 @@ const { start, stop, send, status, beacons, events } = useLxmf({
 | `TcpClient` | 1 | TCP client to remote node |
 | `TcpServer` | 2 | TCP server |
 | `Reticulum` | 3 | Full Reticulum stack via local `rnsd` |
+| `ReticulumAndBle` | 4 | Full Reticulum stack + BLE mesh |
 
 ## Expo Plugin
 
@@ -65,7 +66,7 @@ BLE / TCP mesh / RNode (LoRa support via external hardware)
 
 ## Repo
 
-[github.com/anon0mesh/lxmf_react_native_rust](https://github.com/anon0mesh/lxmf_react_native_rust)
+[github.com/magicred-1/react-native-lxmf](https://github.com/magicred-1/react-native-lxmf)
 
 ---
 
