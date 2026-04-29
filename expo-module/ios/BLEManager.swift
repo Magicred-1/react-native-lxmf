@@ -433,26 +433,18 @@ extension BLEManager: CBPeripheralDelegate {
             return
         }
 
-        // Phone-to-phone mesh characteristics — mark as bonded and register with Rust
+        // Phone-to-phone mesh: store RX char and subscribe to TX notifications.
+        // lxmf_ble_connected is deferred until didUpdateNotificationStateFor confirms
+        // the CCCD write — otherwise Rust tries to TX before the pipe is open.
         bondedPeripherals.insert(peripheral.identifier)
         saveBondedPeripherals()
         let addr = BLEManager.uuidToAddr(peripheral.identifier)
         addrToPeripheralUUID[addr] = peripheral.identifier
-        addr.withUnsafeBytes { ptr in
-            _ = lxmf_ble_connected(ptr.baseAddress?.assumingMemoryBound(to: UInt8.self))
-        }
-        // Report negotiated write limit so Rust segments correctly for this peer.
-        let writeLimit = peripheral.maximumWriteValueLength(for: .withoutResponse)
-        addr.withUnsafeBytes { ptr in
-            _ = lxmf_ble_mtu_negotiated(ptr.baseAddress?.assumingMemoryBound(to: UInt8.self), UInt32(writeLimit))
-        }
 
         for char in chars {
             if char.uuid == BLEManager.rxCharUUID {
-                // This is the peer's RX — we write to it
                 txCharacteristics[peripheral.identifier] = char
             } else if char.uuid == BLEManager.txCharUUID {
-                // This is the peer's TX — subscribe for notifications
                 peripheral.setNotifyValue(true, for: char)
             }
         }
@@ -484,6 +476,28 @@ extension BLEManager: CBPeripheralDelegate {
                 )
             }
         }
+    }
+
+    // CCCD subscription confirmed (or failed) — now safe to register peer with Rust.
+    func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: Error?) {
+        guard characteristic.uuid == BLEManager.txCharUUID else { return }
+
+        if let error = error {
+            NSLog("[BLE] CCCD subscribe failed for %@: %@", peripheral.identifier.uuidString, error.localizedDescription)
+            centralManager?.cancelPeripheralConnection(peripheral)
+            return
+        }
+        guard characteristic.isNotifying else { return }
+
+        let addr = BLEManager.uuidToAddr(peripheral.identifier)
+        addr.withUnsafeBytes { ptr in
+            _ = lxmf_ble_connected(ptr.baseAddress?.assumingMemoryBound(to: UInt8.self))
+        }
+        let writeLimit = peripheral.maximumWriteValueLength(for: .withoutResponse)
+        addr.withUnsafeBytes { ptr in
+            _ = lxmf_ble_mtu_negotiated(ptr.baseAddress?.assumingMemoryBound(to: UInt8.self), UInt32(writeLimit))
+        }
+        NSLog("[BLE] peer ready (client): %@, writeLimit=%d", peripheral.identifier.uuidString, writeLimit)
     }
 
     // Called when writeValue(.withoutResponse) exhausted the internal queue.
