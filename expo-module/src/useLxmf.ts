@@ -63,6 +63,8 @@ export interface UseLxmfOptions {
   bleMtuHint?: number;
   /** Display name broadcast in LXMF announces. Default: "lxmf-mobile" */
   displayName?: string;
+  /** Advertise this node as an anonmesh beacon (app_data = "anonmesh::beacon::v1\0<name>"). Default: false */
+  isBeacon?: boolean;
 }
 
 function parseJson<T>(value: string | null, fallback: T): T {
@@ -178,6 +180,7 @@ export function useLxmf(options: UseLxmfOptions = {}) {
       mode?: LxmfNodeMode;
       tcpInterfaces?: TcpInterface[];
       displayName?: string;
+      isBeacon?: boolean;
     }) => {
       try {
         if (!isLxmfNativeAvailable) {
@@ -199,6 +202,7 @@ export function useLxmf(options: UseLxmfOptions = {}) {
         const announceMs = options.announceIntervalMs ?? 5000;
         const bleMtu = options.bleMtuHint ?? 255;
         const displayName = overrides?.displayName ?? options.displayName ?? '';
+        const isBeacon = overrides?.isBeacon ?? options.isBeacon ?? false;
 
         if (mode !== LxmfNodeMode.BleOnly && tcpInterfaces.length === 0) {
           setError(`Mode ${mode} requires at least one TCP interface.`);
@@ -213,6 +217,7 @@ export function useLxmf(options: UseLxmfOptions = {}) {
           bleMtu,
           tcpInterfaces,
           displayName,
+          isBeacon,
         );
         setRunning(true);
         syncStatus();
@@ -231,6 +236,7 @@ export function useLxmf(options: UseLxmfOptions = {}) {
       options.announceIntervalMs,
       options.bleMtuHint,
       options.displayName,
+      options.isBeacon,
       syncStatus,
     ]
   );

@@ -17,7 +17,8 @@ export type NativeModuleType = {
     announceIntervalMs: number,
     bleMtuHint: number,
     tcpInterfaces: { host: string; port: number }[],
-    displayName: string
+    displayName: string,
+    isBeacon: boolean
   ): Promise<boolean>;
   stop(): Promise<boolean>;
   isRunning(): boolean;

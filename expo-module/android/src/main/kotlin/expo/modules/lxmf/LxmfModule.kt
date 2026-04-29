@@ -66,8 +66,9 @@ class LxmfModule : Module() {
 
     AsyncFunction("start") { identityHex: String, lxmfAddressHex: String, mode: Int,
                               announceIntervalMs: Double, bleMtuHint: Int,
-                              tcpInterfaces: List<Map<String, Any>>, displayName: String ->
-      Log.d(TAG, "start() mode=$mode interfaces=$tcpInterfaces name=$displayName")
+                              tcpInterfaces: List<Map<String, Any>>, displayName: String,
+                              isBeacon: Boolean ->
+      Log.d(TAG, "start() mode=$mode interfaces=$tcpInterfaces name=$displayName beacon=$isBeacon")
       val interfacesJson = org.json.JSONArray(tcpInterfaces.map { iface ->
         org.json.JSONObject().apply {
           put("host", iface["host"] ?: "")
@@ -75,7 +76,7 @@ class LxmfModule : Module() {
         }
       }).toString()
       val rc = nativeStart(identityHex, lxmfAddressHex, mode, announceIntervalMs.toLong(),
-                  bleMtuHint.toShort(), interfacesJson, displayName)
+                  bleMtuHint.toShort(), interfacesJson, displayName, isBeacon)
       if (rc != 0) throw RuntimeException("nativeStart returned $rc")
       true
     }
@@ -195,7 +196,8 @@ class LxmfModule : Module() {
     announceIntervalMs: Long,
     bleMtuHint: Short,
     tcpInterfacesJson: String,
-    displayName: String
+    displayName: String,
+    isBeacon: Boolean
   ): Int
   private external fun nativeStop(): Int
   private external fun nativeIsRunning(): Boolean

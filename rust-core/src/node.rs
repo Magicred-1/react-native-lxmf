@@ -160,18 +160,19 @@ impl LxmfNode {
         _ble_mtu_hint: u16,
         interfaces_json: &str,
         display_name: &str,
+        is_beacon: bool,
     ) -> Result<(), String> {
-        info!("LxmfNode::start mode={} interfaces={} name={}", mode, interfaces_json, display_name);
+        info!("LxmfNode::start mode={} interfaces={} name={} beacon={}", mode, interfaces_json, display_name, is_beacon);
 
         match mode {
             3 => {
                 let interfaces = parse_interfaces_json(interfaces_json)?;
-                Self::start_reticulum(identity_hex, &interfaces, announce_interval_ms, display_name)
+                Self::start_reticulum(identity_hex, &interfaces, announce_interval_ms, display_name, is_beacon)
             }
-            0 => Self::start_ble(identity_hex, address_hex, display_name),
+            0 => Self::start_ble(identity_hex, address_hex, display_name, is_beacon),
             4 => {
                 let interfaces = parse_interfaces_json(interfaces_json)?;
-                Self::start_full(identity_hex, &interfaces, announce_interval_ms, display_name)
+                Self::start_full(identity_hex, &interfaces, announce_interval_ms, display_name, is_beacon)
             }
             _ => Err(format!("Unsupported mode: {}. Use 0 (BLE), 3 (TCP), or 4 (TCP+BLE)", mode)),
         }
@@ -183,6 +184,7 @@ impl LxmfNode {
         interfaces: &[(String, u16)],
         announce_interval_ms: u64,
         display_name: &str,
+        is_beacon: bool,
     ) -> Result<(), String> {
         use rns_transport::identity::PrivateIdentity;
         use rns_transport::transport::TransportConfig;
@@ -221,12 +223,7 @@ impl LxmfNode {
 
         let rt = get_runtime();
 
-        // Clamp display name to 32 bytes, fall back to "lxmf-mobile"
-        let name_bytes: Vec<u8> = if display_name.is_empty() {
-            b"lxmf-mobile".to_vec()
-        } else {
-            display_name.as_bytes()[..display_name.len().min(32)].to_vec()
-        };
+        let name_bytes: Vec<u8> = build_app_data(display_name, is_beacon);
 
         // Set up transport synchronously so we can store the handle
         let name_bytes_init = name_bytes.clone();
@@ -461,6 +458,7 @@ impl LxmfNode {
         interfaces: &[(String, u16)],
         announce_interval_ms: u64,
         display_name: &str,
+        is_beacon: bool,
     ) -> Result<(), String> {
         use rns_transport::identity::PrivateIdentity;
         use rns_transport::transport::TransportConfig;
@@ -491,11 +489,7 @@ impl LxmfNode {
 
         let rt = get_runtime();
 
-        let name_bytes: Vec<u8> = if display_name.is_empty() {
-            b"lxmf-mobile".to_vec()
-        } else {
-            display_name.as_bytes()[..display_name.len().min(32)].to_vec()
-        };
+        let name_bytes: Vec<u8> = build_app_data(display_name, is_beacon);
 
         let name_bytes_init = name_bytes.clone();
         let (transport_arc, my_dest, mut data_rx, mut resource_rx, announce_rx, lxmf_addr_hex) = rt.block_on(async move {
@@ -828,7 +822,7 @@ impl LxmfNode {
     /// The Kotlin BleManager must be started separately (it owns hardware access).
     /// Call `nativeBleConnected` / `nativeBleDisconnected` / `nativeBleReceive` from Kotlin
     /// as BLE peers connect and send data.
-    fn start_ble(identity_hex: &str, _address_hex: &str, display_name: &str) -> Result<(), String> {
+    fn start_ble(identity_hex: &str, _address_hex: &str, display_name: &str, is_beacon: bool) -> Result<(), String> {
         use rns_transport::identity::PrivateIdentity;
         use rns_transport::transport::TransportConfig;
         use rns_transport::destination::DestinationName;
@@ -889,11 +883,7 @@ impl LxmfNode {
 
                 // Send initial announce (broadcast to any connected BLE peers).
                 info!("LxmfNode BLE: sending announce as {}", addr_hex);
-                let ble_name: Vec<u8> = if display_name.is_empty() {
-                    b"lxmf-mobile".to_vec()
-                } else {
-                    display_name.as_bytes()[..display_name.len().min(32)].to_vec()
-                };
+                let ble_name = build_app_data(&display_name, is_beacon);
                 transport.send_announce(&my_dest, Some(ble_name.as_slice())).await;
 
                 let data_rx = transport.received_data_events();
@@ -980,11 +970,7 @@ impl LxmfNode {
         // queued in the opportunistic-retry buffer indefinitely.
         let transport_reannounce = Arc::clone(&transport_arc);
         let dest_reannounce = Arc::clone(&my_dest);
-        let name_bytes_reann: Vec<u8> = if display_name_reann.is_empty() {
-            b"lxmf-mobile".to_vec()
-        } else {
-            display_name_reann.as_bytes()[..display_name_reann.len().min(32)].to_vec()
-        };
+        let name_bytes_reann: Vec<u8> = build_app_data(&display_name_reann, is_beacon);
         // Event-driven re-announce on BLE peer connect. The 5s periodic timer
         // below handles the cold-start case; this handles the case where a peer
         // (re)connects later and would otherwise wait up to 300s for the next
@@ -1162,6 +1148,23 @@ impl LxmfNode {
 
     pub fn abi_version() -> u32 {
         2 // v2 = rns-transport based
+    }
+}
+
+/// Build announce app_data.
+/// Beacon nodes: `b"anonmesh::beacon::v1\0" + display_name` so CLI can discover them via startswith.
+/// Non-beacon nodes: just the display name (legacy behaviour).
+fn build_app_data(display_name: &str, is_beacon: bool) -> Vec<u8> {
+    const PREFIX: &[u8] = b"anonmesh::beacon::v1\0";
+    let name = if display_name.is_empty() { "lxmf-mobile" } else { display_name };
+    let name_bytes = &name.as_bytes()[..name.len().min(32)];
+    if is_beacon {
+        let mut data = Vec::with_capacity(PREFIX.len() + name_bytes.len());
+        data.extend_from_slice(PREFIX);
+        data.extend_from_slice(name_bytes);
+        data
+    } else {
+        name_bytes.to_vec()
     }
 }
 

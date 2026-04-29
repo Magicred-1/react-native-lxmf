@@ -53,6 +53,7 @@ pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeStart(
     ble_mtu_hint: jshort,
     tcp_interfaces_json: JString,
     display_name: JString,
+    is_beacon: jboolean,
 ) -> jint {
     let id_str: String = match env.get_string(&identity_hex) {
         Ok(s) => s.into(),
@@ -75,7 +76,7 @@ pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeStart(
         env.get_string(&display_name).ok().map(|s| s.into()).unwrap_or_default()
     };
 
-    error!("LxmfModule: starting node mode={} interfaces={} name={}", mode, interfaces_json, display_name_str);
+    error!("LxmfModule: starting node mode={} interfaces={} name={} beacon={}", mode, interfaces_json, display_name_str, is_beacon != 0);
 
     match LxmfNode::start(
         &id_str,
@@ -85,6 +86,7 @@ pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeStart(
         ble_mtu_hint as u16,
         &interfaces_json,
         &display_name_str,
+        is_beacon != 0,
     ) {
         Ok(()) => {
             error!("LxmfModule: node started successfully");

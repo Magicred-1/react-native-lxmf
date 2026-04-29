@@ -39,6 +39,7 @@ pub unsafe extern "C" fn lxmf_start(
     ble_mtu_hint: u16,
     tcp_interfaces_json: *const c_char,
     display_name: *const c_char,
+    is_beacon: u8,
 ) -> i32 {
     let id = if identity_hex.is_null() { "" } else {
         match CStr::from_ptr(identity_hex).to_str() { Ok(s) => s, Err(_) => return STATUS_ERR }
@@ -53,7 +54,7 @@ pub unsafe extern "C" fn lxmf_start(
         match CStr::from_ptr(display_name).to_str() { Ok(s) => s, Err(_) => return STATUS_ERR }
     };
 
-    match LxmfNode::start(id, addr, mode, announce_interval_ms, ble_mtu_hint, interfaces, name) {
+    match LxmfNode::start(id, addr, mode, announce_interval_ms, ble_mtu_hint, interfaces, name, is_beacon != 0) {
         Ok(()) => STATUS_OK,
         Err(_) => STATUS_ERR,
     }

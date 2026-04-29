@@ -13,7 +13,8 @@ func lxmf_start(
     _ announceIntervalMs: UInt64,
     _ bleMtuHint: UInt16,
     _ tcpInterfacesJson: UnsafePointer<CChar>?,
-    _ displayName: UnsafePointer<CChar>?
+    _ displayName: UnsafePointer<CChar>?,
+    _ isBeacon: UInt8
 ) -> Int32
 
 @_silgen_name("lxmf_stop")
@@ -182,7 +183,8 @@ public class LxmfModule: Module {
             announceIntervalMs: Double,
             bleMtuHint: Int,
             tcpInterfaces: [[String: Any]],
-            displayName: String
+            displayName: String,
+            isBeacon: Bool
         ) -> Bool in
             // Serialize TCP interfaces to JSON (matches Android pattern)
             let interfacesJson: String
@@ -200,7 +202,8 @@ public class LxmfModule: Module {
                             lxmf_start(
                                 idPtr, addrPtr,
                                 UInt32(mode), UInt64(announceIntervalMs),
-                                UInt16(bleMtuHint), ifacesPtr, namePtr
+                                UInt16(bleMtuHint), ifacesPtr, namePtr,
+                                isBeacon ? 1 : 0
                             )
                         }
                     }
