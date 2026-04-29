@@ -544,7 +544,7 @@ extension BLEManager: CBPeripheralManagerDelegate {
     }
 
     func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral,
-                           didSubscribeTo characteristic: CBCharacteristic) {
+                            didSubscribeTo characteristic: CBCharacteristic) {
         if !subscribedCentrals.contains(where: { $0.identifier == central.identifier }) {
             subscribedCentrals.append(central)
             // Register central as a peer with Rust
