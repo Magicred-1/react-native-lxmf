@@ -20,7 +20,7 @@
 ### 1️⃣ I just want to run the example app
 
 ```bash
-cd example-app
+cd expo-module/example
 npm install
 npm start
 # Scan QR code with Expo Go on physical device
@@ -108,7 +108,7 @@ lxmf_react_native_rust/
 │           └── expo/modules/lxmf/
 │               └── LxmfModule.kt ← Expo module + JNI
 │
-└── example-app/                ← Runnable demo
+└── expo-module/example/                ← Runnable demo
     ├── package.json
     ├── app.json
     ├── README.md               ← Example app guide
@@ -152,7 +152,7 @@ lxmf_react_native_rust/
 - `useLxmf.ts` — React hook with full API
 - `index.ts` — Barrel export
 
-### Example App (`example-app/`)
+### Example App (`expo-module/example/`)
 
 **3 Screens:**
 1. **Home** — Initialize node (generate identity, start/stop)
@@ -166,7 +166,7 @@ lxmf_react_native_rust/
 ### Option 1: Run Example App (Simplest)
 
 ```bash
-cd example-app
+cd expo-module/example
 npm install
 npm start
 # Opens Expo CLI
@@ -202,7 +202,7 @@ cd ../expo-module
 npm run build
 
 # Test in example app:
-cd ../example-app
+cd ../expo-module/example
 npm start
 ```
 
@@ -233,7 +233,7 @@ npm start
 | **QUICKSTART.md** | 7-min guided walkthrough |
 | **INTEGRATION.md** | Full architecture (260 lines) |
 | **FFI_WIRING.md** | FFI layer deep-dive (360 lines) |
-| **example-app/README.md** | Example app specifics |
+| **expo-module/example/README.md** | Example app specifics |
 
 ---
 
@@ -255,7 +255,7 @@ npm start
 ## 🚀 Next Steps
 
 ### Immediate (Testing)
-1. Run `cd example-app && npm start`
+1. Run `cd expo-module/example && npm start`
 2. Test on iOS simulator or Android emulator
 3. Follow [QUICKSTART.md](./QUICKSTART.md) for physical device testing
 
@@ -327,7 +327,7 @@ A: Use `eas build` (Expo's build service) or build locally with Xcode/Android St
 - **General questions**: Read INTEGRATION.md
 - **How to run**: Read QUICKSTART.md
 - **FFI details**: Read FFI_WIRING.md
-- **Example app**: Read example-app/README.md
+- **Example app**: Read expo-module/example/README.md
 - **Rust issues**: Check rust-core/ files
 - **Native issues**: Check expo-module/ files
 
@@ -335,5 +335,5 @@ A: Use `eas build` (Expo's build service) or build locally with Xcode/Android St
 
 **You're all set! 🎉 Ready to mesh.** 
 
-Start with: `cd example-app && npm start`
+Start with: `cd expo-module/example && npm start`
 

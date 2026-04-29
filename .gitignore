@@ -22,6 +22,7 @@ node_modules/
 package-lock.json
 yarn.lock
 .npm
+.env
 
 # React Native / Expo
 .expo/

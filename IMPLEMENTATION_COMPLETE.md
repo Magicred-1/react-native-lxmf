@@ -74,7 +74,7 @@ Complete LXMF/Reticulum mesh networking bridge for React Native, spanning Rust F
 - **QUICKSTART.md** (7KB): 5-min setup, step-by-step walkthrough
 - **INTEGRATION.md** (8.6KB): Full architecture with diagrams
 - **FFI_WIRING.md** (12KB): Detailed FFI layer explanation
-- **example-app/README.md** (4.8KB): Example app specifics
+- **expo-module/example/README.md** (4.8KB): Example app specifics
 
 ### 7. Example App ✅
 - **3 Screens**:
@@ -143,7 +143,7 @@ lxmf_react_native_rust/
 │       ├── build.gradle.kts
 │       └── src/main/kotlin/expo/modules/lxmf/LxmfModule.kt
 │
-└── example-app/
+└── expo-module/example/
     ├── package.json
     ├── app.json
     ├── README.md
@@ -163,7 +163,7 @@ lxmf_react_native_rust/
 ### Minimal (30 seconds)
 
 ```bash
-cd example-app
+cd expo-module/example
 npm install
 npm start
 # Press 'i' (iOS) or 'a' (Android)
@@ -177,7 +177,7 @@ cd rust-core
 cargo build --release
 
 # Install example
-cd ../example-app
+cd expo-module/example
 npm install
 
 # Run
@@ -311,7 +311,7 @@ Rust (poll) → Native (JSON) → JS (event) → React (re-render)
 ### Add a New Screen
 
 ```tsx
-// example-app/app/settings.tsx
+// expo-module/example/app/settings.tsx
 import { useLxmf } from '@lxmf/react-native';
 
 export default function SettingsScreen() {
@@ -343,7 +343,7 @@ export function useBeaconManager() {
 cd rust-core
 # Edit src/node.rs or other files
 cargo build --release
-cd ../example-app
+cd expo-module/example
 npm start  # Hot reload in Expo
 ```
 
@@ -473,7 +473,7 @@ eas build --platform ios
 ## Getting Started
 
 1. **Read**: `START_HERE.md` (this directory)
-2. **Setup**: `cd example-app && npm install`
+2. **Setup**: `cd expo-module/example && npm install`
 3. **Run**: `npm start`
 4. **Test**: Follow QUICKSTART.md
 

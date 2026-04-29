@@ -20,7 +20,7 @@ npm --version     # Should be v9+
 ### 2. Install Dependencies
 
 ```bash
-cd example-app
+cd expo-module/example
 npm install
 ```
 
@@ -45,7 +45,7 @@ Follow the prompts:
 1. **Install Expo Go** on your iPhone from App Store
 2. **In terminal:**
    ```bash
-   cd example-app
+   cd expo-module/example
    npm start
    ```
 3. **Scan the QR code** with your iPhone camera
@@ -57,7 +57,7 @@ Follow the prompts:
 1. **Install Expo Go** on your Android from Play Store
 2. **In terminal:**
    ```bash
-   cd example-app
+   cd expo-module/example
    npm start
    ```
 3. **Open Expo Go** → Tap QR scanner icon → scan terminal QR code
@@ -66,7 +66,7 @@ Follow the prompts:
 ### iOS Simulator
 
 ```bash
-cd example-app
+cd expo-module/example
 npm start
 # Press 'i'
 ```
@@ -76,7 +76,7 @@ npm start
 ### Android Emulator
 
 ```bash
-cd example-app
+cd expo-module/example
 npm start
 # Press 'a'
 ```
@@ -168,8 +168,8 @@ npm start
 ### "Cannot find module @lxmf/react-native"
 
 ```bash
-# From example-app directory:
-npm install ../expo-module
+# From expo-module/example directory:
+npm install ..
 npm start
 ```
 
@@ -211,7 +211,7 @@ cd android
 ./gradlew clean
 
 # Rebuild example:
-cd ../../example-app
+cd ../../expo-module/example
 npx expo run:android
 ```
 
@@ -262,7 +262,7 @@ lxmf_react_native_rust/
 │   │       └── expo/modules/lxmf/LxmfModule.kt
 │   └── LxmfReactNative.podspec
 │
-└── example-app/                 # Runnable example
+└── expo-module/example/                 # Runnable example
     ├── package.json
     ├── app.json                # Expo config
     ├── app/
@@ -336,10 +336,15 @@ BLE Mesh Network
 
 ## Support
 
-- **App Issues**: Check `example-app/README.md`
+- **App Issues**: Check `expo-module/example/README.md`
 - **Module Issues**: Check `expo-module/` docs
 - **Rust Issues**: Check `rust-core/` docs
 - **LXMF-rs**: See [FreeTAKTeam/LXMF-rs](https://github.com/FreeTAKTeam/LXMF-rs)
+
+## Contributors
+- [Magicred-1](https://github.com/Magicred-1)
+- [FwazB](https://github.com/FwazB)
+- [FreeTAKTeam](https://github.com/FreeTAKTeam)
 
 ---
 
