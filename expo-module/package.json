@@ -1,6 +1,6 @@
 {
   "name": "@magicred-1/react-native-lxmf",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "LXMF Reticulum mesh networking for React Native + Expo",
   "main": "build/index.js",
   "types": "build/index.d.ts",
