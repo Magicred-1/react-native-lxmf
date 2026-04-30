@@ -78,7 +78,7 @@ export interface UseLxmfOptions {
   mode?: LxmfNodeMode;
   /** One or more TCP interfaces to connect to (required for Reticulum mode). */
   tcpInterfaces?: TcpInterface[];
-  /** Announce interval in ms. Default: 5000 */
+  /** Announce interval in ms. Default: 60000 for BLE modes, 5000 for TCP-only. Rust enforces 60s minimum for BLE. */
   announceIntervalMs?: number;
   /** BLE MTU hint. Default: 255 */
   bleMtuHint?: number;
@@ -220,7 +220,9 @@ export function useLxmf(options: UseLxmfOptions = {}) {
 
         const mode = overrides?.mode ?? options.mode ?? LxmfNodeMode.BleOnly;
         const tcpInterfaces = overrides?.tcpInterfaces ?? options.tcpInterfaces ?? [];
-        const announceMs = options.announceIntervalMs ?? 5000;
+        const BLE_MODES = [LxmfNodeMode.BleOnly, LxmfNodeMode.ReticulumAndBle];
+        const defaultAnnounceMs = BLE_MODES.includes(mode) ? 60_000 : 5_000;
+        const announceMs = options.announceIntervalMs ?? defaultAnnounceMs;
         const bleMtu = options.bleMtuHint ?? 255;
         const displayName = overrides?.displayName ?? options.displayName ?? '';
         const isBeacon = overrides?.isBeacon ?? options.isBeacon ?? false;

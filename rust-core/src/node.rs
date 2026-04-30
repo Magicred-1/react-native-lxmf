@@ -181,6 +181,14 @@ impl LxmfNode {
     ) -> Result<(), String> {
         info!("LxmfNode::start mode={} interfaces={} name={} beacon={}", mode, interfaces_json, display_name, is_beacon);
 
+        // BLE can't sustain frequent announce broadcasts — clamp to 60s minimum for
+        // any mode that includes a BLE interface to avoid tx queue saturation.
+        const BLE_MIN_ANNOUNCE_MS: u64 = 60_000;
+        let announce_interval_ms = match mode {
+            0 | 4 => announce_interval_ms.max(BLE_MIN_ANNOUNCE_MS),
+            _ => announce_interval_ms,
+        };
+
         match mode {
             3 => {
                 let interfaces = parse_interfaces_json(interfaces_json)?;
