@@ -45,6 +45,9 @@ pub enum LxmfEvent {
         timestamp: u64,
     },
     AnnounceReceived { dest_hash: DestHash, app_data: Vec<u8>, hops: u8 },
+    MessageQueued { seq: u64, dest_hex: String },
+    MessageDelivered { seq: u64, dest_hex: String },
+    MessageFailed { seq: u64, dest_hex: String, reason: String },
     Log { level: u32, message: String },
     Error { code: u32, message: String },
 }
@@ -73,6 +76,7 @@ struct PendingSend {
     seq: u64,
     dest: [u8; 16],
     lxmf_payload: Vec<u8>,
+    store_id: Option<i64>,
 }
 
 /// The main LXMF node — wraps either embedded FFI or full rns-transport
@@ -82,7 +86,7 @@ pub struct LxmfNode {
     /// Beacon manager
     pub beacon_mgr: BeaconManager,
     /// Message persistence
-    pub store: Option<MessageStore>,
+    pub store: Option<Arc<MessageStore>>,
     /// Running state
     running: bool,
     /// Identity hex (for display)
@@ -123,7 +127,9 @@ impl LxmfNode {
         crate::log_bridge::init_logger(log::LevelFilter::Debug);
 
         let store = db_path.map(|p| {
-            MessageStore::open(p).map_err(|e| format!("SQLite open failed: {e}"))
+            MessageStore::open(p)
+                .map_err(|e| format!("SQLite open failed: {e}"))
+                .map(Arc::new)
         }).transpose()?;
 
         let node = LxmfNode {
@@ -297,14 +303,34 @@ impl LxmfNode {
         };
         let transport_for_ann = Arc::clone(&transport_arc);
 
+        let store_arc: Option<Arc<MessageStore>> = {
+            let guard = Self::global().lock().map_err(|e| e.to_string())?;
+            let node = guard.as_ref().ok_or("Node not initialized")?;
+            node.store.clone()
+        };
+        if let Some(s) = &store_arc {
+            if let Ok(rows) = s.all_outbound_queue() {
+                let mut q = pending_for_ann.lock().unwrap_or_else(|p| p.into_inner());
+                let existing_seqs: std::collections::HashSet<u64> = q.iter().map(|p| p.seq).collect();
+                for (id, seq, dest, payload) in rows {
+                    if !existing_seqs.contains(&seq) {
+                        q.push(PendingSend { seq, dest, lxmf_payload: payload, store_id: Some(id) });
+                    }
+                }
+            }
+        }
+
         // Collect JoinHandles so stop() can abort every spawned task and
         // prevent zombie task accumulation across Stop/Start cycles.
         let mut task_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
         // Spawn announce receiver
         let events_ann = Arc::clone(&events);
+        let store_ann = store_arc.clone();
+        let pending_for_ann_task = Arc::clone(&pending_for_ann);
         let mut announce_rx = announce_rx;
         task_handles.push(rt.spawn(async move {
+            let pending_for_ann = pending_for_ann_task;
             loop {
                 match announce_rx.recv().await {
                     Ok(event) => {
@@ -317,19 +343,20 @@ impl LxmfNode {
                         drop(dest);
 
                         // Flush any queued opportunistic sends for this peer
-                        let to_retry: Vec<(u64, Vec<u8>)> = {
+                        let to_retry: Vec<(u64, Option<i64>, Vec<u8>)> = {
                             let mut q = pending_for_ann.lock().unwrap_or_else(|p| p.into_inner());
                             let (matched, rest): (Vec<_>, Vec<_>) =
                                 q.drain(..).partition(|s| s.dest == dh);
                             *q = rest;
-                            matched.into_iter().map(|s| (s.seq, s.lxmf_payload)).collect()
+                            matched.into_iter().map(|s| (s.seq, s.store_id, s.lxmf_payload)).collect()
                         };
 
                         if !to_retry.is_empty() {
                             use rns_transport::hash::AddressHash;
                             use rns_transport::packet::{Packet, PacketDataBuffer};
+                            use rns_transport::transport::SendPacketOutcome;
                             let transport = transport_for_ann.lock().await;
-                            for (seq, payload) in &to_retry {
+                            for (seq, store_id, payload) in &to_retry {
                                 let mut dest_arr = [0u8; 16];
                                 dest_arr.copy_from_slice(&payload[..16]);
                                 let packet = Packet {
@@ -339,6 +366,20 @@ impl LxmfNode {
                                 };
                                 let outcome = transport.send_packet_with_outcome(packet).await;
                                 info!("LxmfNode: opportunistic retry seq={} -> {:?}", seq, outcome);
+                                match outcome {
+                                    SendPacketOutcome::SentDirect | SendPacketOutcome::SentBroadcast => {
+                                        if let Some(id) = store_id {
+                                            if let Some(s) = &store_ann { let _ = s.remove_outbound(*id); }
+                                        }
+                                        if let Ok(mut eq) = events_ann.lock() {
+                                            eq.push_back(LxmfEvent::MessageDelivered { seq: *seq, dest_hex: hex::encode(&dh) });
+                                        }
+                                    }
+                                    _ => {
+                                        let mut q = pending_for_ann.lock().unwrap_or_else(|p| p.into_inner());
+                                        q.push(PendingSend { seq: *seq, dest: dh, lxmf_payload: payload.clone(), store_id: *store_id });
+                                    }
+                                }
                             }
                         }
 
@@ -419,6 +460,68 @@ impl LxmfNode {
                     .await
                     .send_announce(&my_dest, Some(name_bytes.as_slice()))
                     .await;
+            }
+        }));
+
+        // Periodic retry task (every 60s)
+        let transport_retry = Arc::clone(&transport_arc);
+        let pending_retry = Arc::clone(&pending_for_ann);
+        let store_retry = store_arc.clone();
+        let events_retry = Arc::clone(&events);
+        task_handles.push(rt.spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                if let Some(s) = &store_retry {
+                    if let Ok(expired) = s.drain_expired_outbound(50) {
+                        for (_, seq, dest) in expired {
+                            warn!("LxmfNode: giving up on seq={} after 50 attempts", seq);
+                            if let Ok(mut eq) = events_retry.lock() {
+                                eq.push_back(LxmfEvent::MessageFailed {
+                                    seq,
+                                    dest_hex: hex::encode(&dest),
+                                    reason: "max attempts reached".to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+                let snapshot: Vec<(u64, Option<i64>, Vec<u8>, [u8; 16])> = {
+                    let q = pending_retry.lock().unwrap_or_else(|p| p.into_inner());
+                    q.iter().map(|s| (s.seq, s.store_id, s.lxmf_payload.clone(), s.dest)).collect()
+                };
+                if !snapshot.is_empty() {
+                    use rns_transport::hash::AddressHash;
+                    use rns_transport::packet::{Packet, PacketDataBuffer};
+                    use rns_transport::transport::SendPacketOutcome;
+                    let transport = transport_retry.lock().await;
+                    for (seq, store_id, payload, dest) in snapshot {
+                        let packet = Packet {
+                            destination: AddressHash::new(dest),
+                            data: PacketDataBuffer::new_from_slice(&payload),
+                            ..Default::default()
+                        };
+                        let outcome = transport.send_packet_with_outcome(packet).await;
+                        match outcome {
+                            SendPacketOutcome::SentDirect | SendPacketOutcome::SentBroadcast => {
+                                {
+                                    let mut q = pending_retry.lock().unwrap_or_else(|p| p.into_inner());
+                                    q.retain(|s| s.seq != seq);
+                                }
+                                if let Some(id) = store_id {
+                                    if let Some(s) = &store_retry { let _ = s.remove_outbound(id); }
+                                }
+                                if let Ok(mut eq) = events_retry.lock() {
+                                    eq.push_back(LxmfEvent::MessageDelivered { seq, dest_hex: hex::encode(&dest) });
+                                }
+                            }
+                            _ => {
+                                if let Some(id) = store_id {
+                                    if let Some(s) = &store_retry { let _ = s.bump_outbound_attempts(id); }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }));
 
@@ -538,12 +641,32 @@ impl LxmfNode {
         };
         let transport_for_ann = Arc::clone(&transport_arc);
 
+        let store_arc: Option<Arc<MessageStore>> = {
+            let guard = Self::global().lock().map_err(|e| e.to_string())?;
+            let node = guard.as_ref().ok_or("Node not initialized")?;
+            node.store.clone()
+        };
+        if let Some(s) = &store_arc {
+            if let Ok(rows) = s.all_outbound_queue() {
+                let mut q = pending_for_ann.lock().unwrap_or_else(|p| p.into_inner());
+                let existing_seqs: std::collections::HashSet<u64> = q.iter().map(|p| p.seq).collect();
+                for (id, seq, dest, payload) in rows {
+                    if !existing_seqs.contains(&seq) {
+                        q.push(PendingSend { seq, dest, lxmf_payload: payload, store_id: Some(id) });
+                    }
+                }
+            }
+        }
+
         let mut task_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
         // Announce receiver (identical to mode 3, with opportunistic flush)
         let events_ann = Arc::clone(&events);
+        let store_ann = store_arc.clone();
+        let pending_for_ann_task = Arc::clone(&pending_for_ann);
         let mut announce_rx = announce_rx;
         task_handles.push(rt.spawn(async move {
+            let pending_for_ann = pending_for_ann_task;
             loop {
                 match announce_rx.recv().await {
                     Ok(event) => {
@@ -555,19 +678,20 @@ impl LxmfNode {
                         info!("LxmfNode full: announce from {} ({} hops)", hex::encode(&dh), event.hops);
                         drop(dest);
 
-                        let to_retry: Vec<(u64, Vec<u8>)> = {
+                        let to_retry: Vec<(u64, Option<i64>, Vec<u8>)> = {
                             let mut q = pending_for_ann.lock().unwrap_or_else(|p| p.into_inner());
                             let (matched, rest): (Vec<_>, Vec<_>) =
                                 q.drain(..).partition(|s| s.dest == dh);
                             *q = rest;
-                            matched.into_iter().map(|s| (s.seq, s.lxmf_payload)).collect()
+                            matched.into_iter().map(|s| (s.seq, s.store_id, s.lxmf_payload)).collect()
                         };
 
                         if !to_retry.is_empty() {
                             use rns_transport::hash::AddressHash;
                             use rns_transport::packet::{Packet, PacketDataBuffer};
+                            use rns_transport::transport::SendPacketOutcome;
                             let transport = transport_for_ann.lock().await;
-                            for (seq, payload) in &to_retry {
+                            for (seq, store_id, payload) in &to_retry {
                                 let mut dest_arr = [0u8; 16];
                                 dest_arr.copy_from_slice(&payload[..16]);
                                 let packet = Packet {
@@ -577,6 +701,20 @@ impl LxmfNode {
                                 };
                                 let outcome = transport.send_packet_with_outcome(packet).await;
                                 info!("LxmfNode full: opportunistic retry seq={} -> {:?}", seq, outcome);
+                                match outcome {
+                                    SendPacketOutcome::SentDirect | SendPacketOutcome::SentBroadcast => {
+                                        if let Some(id) = store_id {
+                                            if let Some(s) = &store_ann { let _ = s.remove_outbound(*id); }
+                                        }
+                                        if let Ok(mut eq) = events_ann.lock() {
+                                            eq.push_back(LxmfEvent::MessageDelivered { seq: *seq, dest_hex: hex::encode(&dh) });
+                                        }
+                                    }
+                                    _ => {
+                                        let mut q = pending_for_ann.lock().unwrap_or_else(|p| p.into_inner());
+                                        q.push(PendingSend { seq: *seq, dest: dh, lxmf_payload: payload.clone(), store_id: *store_id });
+                                    }
+                                }
                             }
                         }
 
@@ -680,6 +818,68 @@ impl LxmfNode {
             }
         }));
 
+        // Periodic retry task (every 60s)
+        let transport_retry = Arc::clone(&transport_arc);
+        let pending_retry = Arc::clone(&pending_for_ann);
+        let store_retry = store_arc.clone();
+        let events_retry = Arc::clone(&events);
+        task_handles.push(rt.spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                if let Some(s) = &store_retry {
+                    if let Ok(expired) = s.drain_expired_outbound(50) {
+                        for (_, seq, dest) in expired {
+                            warn!("LxmfNode full: giving up on seq={} after 50 attempts", seq);
+                            if let Ok(mut eq) = events_retry.lock() {
+                                eq.push_back(LxmfEvent::MessageFailed {
+                                    seq,
+                                    dest_hex: hex::encode(&dest),
+                                    reason: "max attempts reached".to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+                let snapshot: Vec<(u64, Option<i64>, Vec<u8>, [u8; 16])> = {
+                    let q = pending_retry.lock().unwrap_or_else(|p| p.into_inner());
+                    q.iter().map(|s| (s.seq, s.store_id, s.lxmf_payload.clone(), s.dest)).collect()
+                };
+                if !snapshot.is_empty() {
+                    use rns_transport::hash::AddressHash;
+                    use rns_transport::packet::{Packet, PacketDataBuffer};
+                    use rns_transport::transport::SendPacketOutcome;
+                    let transport = transport_retry.lock().await;
+                    for (seq, store_id, payload, dest) in snapshot {
+                        let packet = Packet {
+                            destination: AddressHash::new(dest),
+                            data: PacketDataBuffer::new_from_slice(&payload),
+                            ..Default::default()
+                        };
+                        let outcome = transport.send_packet_with_outcome(packet).await;
+                        match outcome {
+                            SendPacketOutcome::SentDirect | SendPacketOutcome::SentBroadcast => {
+                                {
+                                    let mut q = pending_retry.lock().unwrap_or_else(|p| p.into_inner());
+                                    q.retain(|s| s.seq != seq);
+                                }
+                                if let Some(id) = store_id {
+                                    if let Some(s) = &store_retry { let _ = s.remove_outbound(id); }
+                                }
+                                if let Ok(mut eq) = events_retry.lock() {
+                                    eq.push_back(LxmfEvent::MessageDelivered { seq, dest_hex: hex::encode(&dest) });
+                                }
+                            }
+                            _ => {
+                                if let Some(id) = store_id {
+                                    if let Some(s) = &store_retry { let _ = s.bump_outbound_attempts(id); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }));
+
         info!("LxmfNode full: TCP+BLE delivery address = {}", addr_hex);
 
         let mut guard = Self::global().lock().map_err(|e| e.to_string())?;
@@ -711,7 +911,7 @@ impl LxmfNode {
         use rns_transport::packet::{Packet, PacketDataBuffer};
         use rns_transport::transport::SendPacketOutcome;
 
-        let (transport, identity_bytes, source_hash_bytes, seq, pending_sends) = {
+        let (transport, identity_bytes, source_hash_bytes, seq, pending_sends, events, store) = {
             let mut guard = Self::global().lock().map_err(|e| e.to_string())?;
             let node = guard.as_mut().ok_or("Node not initialized")?;
             let transport = node.transport.clone().ok_or("Transport not started (mode 3 only)")?;
@@ -721,7 +921,9 @@ impl LxmfNode {
             let seq = node.outbound_sent;
             node.outbound_sent += 1;
             let pending = Arc::clone(&node.pending_sends);
-            (transport, id_bytes, src, seq, pending)
+            let events = Arc::clone(&node.events);
+            let store = node.store.clone();
+            (transport, id_bytes, src, seq, pending, events, store)
         };
 
         let dest_bytes = hex::decode(dest_hex)
@@ -776,16 +978,31 @@ impl LxmfNode {
                 info!("LxmfNode::send_to: dispatched seq={} ({outcome:?})", seq);
                 Ok(seq)
             }
-            // Peer hasn't announced yet — queue for opportunistic delivery when they announce
             SendPacketOutcome::DroppedMissingDestinationIdentity => {
                 warn!("LxmfNode::send_to: queued seq={} (no identity for {dest_hex})", seq);
+                let store_id = store.as_ref().and_then(|s| {
+                    s.enqueue_outbound(seq, &dest_arr, &lxmf_payload).ok()
+                });
                 if let Ok(mut q) = pending_sends.lock() {
-                    q.push(PendingSend { seq, dest: dest_arr, lxmf_payload });
+                    q.push(PendingSend { seq, dest: dest_arr, lxmf_payload, store_id });
+                }
+                if let Ok(mut eq) = events.lock() {
+                    eq.push_back(LxmfEvent::MessageQueued { seq, dest_hex: dest_hex.to_string() });
                 }
                 Ok(seq)
             }
             SendPacketOutcome::DroppedNoRoute => {
-                Err(format!("no route to /{dest_hex}/"))
+                warn!("LxmfNode::send_to: queued seq={} (no route to {dest_hex})", seq);
+                let store_id = store.as_ref().and_then(|s| {
+                    s.enqueue_outbound(seq, &dest_arr, &lxmf_payload).ok()
+                });
+                if let Ok(mut q) = pending_sends.lock() {
+                    q.push(PendingSend { seq, dest: dest_arr, lxmf_payload, store_id });
+                }
+                if let Ok(mut eq) = events.lock() {
+                    eq.push_back(LxmfEvent::MessageQueued { seq, dest_hex: dest_hex.to_string() });
+                }
+                Ok(seq)
             }
             SendPacketOutcome::DroppedCiphertextTooLarge => {
                 Err("message payload too large after encryption".to_string())

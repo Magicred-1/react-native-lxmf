@@ -34,7 +34,7 @@ export interface LxmfMessageEvent {
 }
 
 export interface LxmfEvent {
-  type: 'statusChanged' | 'packetReceived' | 'txReceived' | 'beaconDiscovered' | 'messageReceived' | 'announceReceived' | 'log' | 'error';
+  type: 'statusChanged' | 'packetReceived' | 'txReceived' | 'beaconDiscovered' | 'messageReceived' | 'announceReceived' | 'messageQueued' | 'messageDelivered' | 'messageFailed' | 'log' | 'error';
   [key: string]: any;
 }
 

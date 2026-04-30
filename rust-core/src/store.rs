@@ -28,8 +28,17 @@ impl MessageStore {
                 timestamp   INTEGER NOT NULL DEFAULT (strftime('%s','now')),
                 relayed_via BLOB
             );
+            CREATE TABLE IF NOT EXISTS outbound_queue (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                seq          INTEGER NOT NULL,
+                dest_hash    BLOB NOT NULL,
+                lxmf_payload BLOB NOT NULL,
+                queued_at    INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+                attempts     INTEGER NOT NULL DEFAULT 0
+            );
             CREATE INDEX IF NOT EXISTS idx_messages_dest ON messages(dest_hash);
             CREATE INDEX IF NOT EXISTS idx_txs_status ON solana_txs(status);
+            CREATE INDEX IF NOT EXISTS idx_outbound_dest ON outbound_queue(dest_hash);
         ")?;
 
         Ok(Self { conn: Mutex::new(conn) })
@@ -98,5 +107,74 @@ impl MessageStore {
         })?.filter_map(|r| r.ok()).collect();
 
         Ok(serde_json::to_string(&rows).unwrap_or_else(|_| "[]".into()))
+    }
+
+    pub fn enqueue_outbound(&self, seq: u64, dest: &[u8; 16], payload: &[u8]) -> Result<i64, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO outbound_queue (seq, dest_hash, lxmf_payload) VALUES (?1, ?2, ?3)",
+            params![seq as i64, &dest[..], payload],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn all_outbound_queue(&self) -> Result<Vec<(i64, u64, [u8; 16], Vec<u8>)>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, seq, dest_hash, lxmf_payload FROM outbound_queue WHERE attempts < 50 ORDER BY id ASC"
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let id: i64 = row.get(0)?;
+            let seq: i64 = row.get(1)?;
+            let dest_blob: Vec<u8> = row.get(2)?;
+            let payload: Vec<u8> = row.get(3)?;
+            Ok((id, seq as u64, dest_blob, payload))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (id, seq, dest_blob, payload) = r?;
+            let mut dest = [0u8; 16];
+            let len = dest_blob.len().min(16);
+            dest[..len].copy_from_slice(&dest_blob[..len]);
+            out.push((id, seq, dest, payload));
+        }
+        Ok(out)
+    }
+
+    pub fn remove_outbound(&self, id: i64) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM outbound_queue WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn bump_outbound_attempts(&self, id: i64) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE outbound_queue SET attempts = attempts + 1 WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn drain_expired_outbound(&self, max_attempts: i64) -> Result<Vec<(i64, u64, [u8; 16])>, rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, seq, dest_hash FROM outbound_queue WHERE attempts >= ?1"
+        )?;
+        let rows = stmt.query_map(params![max_attempts], |row| {
+            let id: i64 = row.get(0)?;
+            let seq: i64 = row.get(1)?;
+            let dest_blob: Vec<u8> = row.get(2)?;
+            Ok((id, seq as u64, dest_blob))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            let (id, seq, dest_blob) = r?;
+            let mut dest = [0u8; 16];
+            let len = dest_blob.len().min(16);
+            dest[..len].copy_from_slice(&dest_blob[..len]);
+            out.push((id, seq, dest));
+        }
+        if !out.is_empty() {
+            conn.execute("DELETE FROM outbound_queue WHERE attempts >= ?1", params![max_attempts])?;
+        }
+        Ok(out)
     }
 }

@@ -473,6 +473,15 @@ fn events_to_json(events: &[crate::node::LxmfEvent]) -> String {
             "type": "announceReceived", "destHash": hex::encode(dest_hash),
             "appData": String::from_utf8_lossy(app_data).to_string(), "hops": hops,
         }),
+        LxmfEvent::MessageQueued { seq, dest_hex } => serde_json::json!({
+            "type": "messageQueued", "seq": seq, "destHex": dest_hex,
+        }),
+        LxmfEvent::MessageDelivered { seq, dest_hex } => serde_json::json!({
+            "type": "messageDelivered", "seq": seq, "destHex": dest_hex,
+        }),
+        LxmfEvent::MessageFailed { seq, dest_hex, reason } => serde_json::json!({
+            "type": "messageFailed", "seq": seq, "destHex": dest_hex, "reason": reason,
+        }),
         LxmfEvent::Log { level, message } => serde_json::json!({
             "type": "log", "level": level, "message": message,
         }),
