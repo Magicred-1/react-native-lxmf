@@ -6,12 +6,13 @@ import {
   ScrollView,
   Share,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   View,
 } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
-import { LxmfModule, LxmfNodeMode, type LxmfEvent, useLxmf } from '@magicred-1/react-native-lxmf';
+import { LxmfModule, LxmfNodeMode, type LxmfEvent, type LxmfMessageEvent, useLxmf } from '@magicred-1/react-native-lxmf';
 
 // Persisted identity blob schema (versioned). Stored in expo-secure-store under
 // IDENTITY_KEY — encrypted at rest on iOS (Keychain) and Android (Keystore-backed).
@@ -78,25 +79,14 @@ function fmtTime(e: LxmfEvent): string {
     .toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-/** Extract message text from raw LXMF hex content.
- *  Skips 96B header (dest+src+sig), scans for longest printable run. */
-function decodeLxmfContent(hexOrStr: string | undefined): string {
-  if (!hexOrStr) return '';
-  const hex = String(hexOrStr);
-  if (!/^[0-9a-fA-F]+$/.test(hex)) return hex;
-  const len = hex.length / 2;
-  if (len <= 96) return `[${len}B raw]`;
+function base64ToUtf8(b64: string): string {
+  if (!b64) return '';
   try {
-    const payload = new Uint8Array(len - 96);
-    for (let i = 0; i < payload.length; i++) {
-      payload[i] = Number.parseInt(hex.slice((i + 96) * 2, (i + 96) * 2 + 2), 16);
-    }
-    const decoded = new TextDecoder('utf-8', { fatal: false }).decode(payload);
-    const runs = decoded.match(/[\x20-\x7E\n\r\t]{4,}/g) ?? [];
-    if (runs.length === 0) return `[${len}B binary]`;
-    return runs.reduce((a, b) => a.length >= b.length ? a : b).trim();
+    const binary = globalThis.atob(b64);
+    const bytes = Uint8Array.from(binary, c => c.codePointAt(0) ?? 0);
+    return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
   } catch {
-    return `[${len}B]`;
+    return '';
   }
 }
 
@@ -205,6 +195,7 @@ export default function HomeScreen() {
   const [tcpHost, setTcpHost] = useState('192.168.1.135');
   const [tcpPort, setTcpPort] = useState('4243');
   const [displayName, setDisplayName] = useState('lxmf-mobile');
+  const [isBeacon, setIsBeacon] = useState(false);
   const [bleActive, setBleActive] = useState(false);
   const [tcpActive, setTcpActive] = useState(false);
   const [transportMsg, setTransportMsg] = useState('');
@@ -335,13 +326,14 @@ export default function HomeScreen() {
       mode: LxmfNodeMode.ReticulumAndBle,
       tcpInterfaces: [{ host, port }],
       displayName: displayName.trim() || 'lxmf-mobile',
+      isBeacon,
     });
     if (ok) {
       setTcpActive(true);
       startBLE();
       setBleActive(true);
     }
-  }, [tcpHost, tcpPort, displayName, start, startBLE]);
+  }, [tcpHost, tcpPort, displayName, isBeacon, start, startBLE]);
 
   const onStopTcp = useCallback(async () => {
     stopBLE();
@@ -378,6 +370,7 @@ export default function HomeScreen() {
         mode: LxmfNodeMode.ReticulumAndBle,
         tcpInterfaces: [{ host, port }],
         displayName: displayName.trim() || 'lxmf-mobile',
+        isBeacon,
       });
       if (!ok) {
         setTransportMsg('Failed to start node.');
@@ -387,7 +380,7 @@ export default function HomeScreen() {
     }
     startBLE();
     setBleActive(true);
-  }, [isRunning, tcpHost, tcpPort, start, startBLE, displayName]);
+  }, [isRunning, tcpHost, tcpPort, isBeacon, start, startBLE, displayName]);
 
   const onStopBle = useCallback(async () => {
     stopBLE();
@@ -505,6 +498,16 @@ export default function HomeScreen() {
           autoCapitalize="none"
           autoCorrect={false}
         />
+        <View style={S.switchRow}>
+          <Text style={S.switchLabel}>Beacon mode</Text>
+          <Switch
+            value={isBeacon}
+            onValueChange={setIsBeacon}
+            disabled={isRunning}
+            trackColor={{ false: C.border, true: C.accent }}
+            thumbColor={isBeacon ? C.accentBright : C.textDim}
+          />
+        </View>
         {transportMsg ? <Text style={S.warn}>{transportMsg}</Text> : null}
         <View style={S.btnRow}>
           <Btn label="Start TCP" onPress={onStartTcp} disabled={!isNativeAvailable || isRunning || !identityHydrated} />
@@ -624,28 +627,31 @@ export default function HomeScreen() {
           <Text style={S.muted}>No messages yet.</Text>
         ) : (
           msgEvts.map((e, i) => {
-            const body = decodeLxmfContent(e.content);
-            const sender = String(e.source ?? '');
+            const msg = e as unknown as LxmfMessageEvent;
+            const bodyText = base64ToUtf8(msg.body ?? '');
+            const titleText = msg.title ? base64ToUtf8(msg.title) : '';
+            const sender = msg.source ?? '';
             return (
               <View key={`${evtKey(e, 'msg-')}-${i}`} style={S.itemCard}>
                 <View style={S.announceHeader}>
                   <View style={S.announceInfo}>
-                    <Text selectable style={S.itemTitle}>
-                      From: {shortHex(sender)}
-                    </Text>
-                    {body ? <Text selectable style={S.itemBody}>{body}</Text> : null}
+                    <Text selectable style={S.itemTitle}>From: {shortHex(sender)}</Text>
+                    {titleText ? <Text selectable style={S.msgTitle}>{titleText}</Text> : null}
+                    {bodyText ? <Text selectable style={S.itemBody}>{bodyText}</Text> : null}
+                    {msg.image ? (
+                      <Text style={S.mediaBadge}>[img: {msg.image.mimeType}]</Text>
+                    ) : null}
+                    {msg.files?.length ? (
+                      <Text style={S.mediaBadge}>[{msg.files.length} file{msg.files.length > 1 ? 's' : ''}]</Text>
+                    ) : null}
                     <Text style={S.itemMeta}>{fmtTime(e)}</Text>
                   </View>
                   {sender ? (
                     <View style={S.announceActions}>
-                      <Pressable
-                        style={S.copyBtn}
-                        onPress={() => copyToClipboard(sender)}>
+                      <Pressable style={S.copyBtn} onPress={() => copyToClipboard(sender)}>
                         <Text style={S.copyBtnText}>⎘</Text>
                       </Pressable>
-                      <Pressable
-                        style={S.sendToBtn}
-                        onPress={() => { setDest(sender); setSendResult(''); }}>
+                      <Pressable style={S.sendToBtn} onPress={() => { setDest(sender); setSendResult(''); }}>
                         <Text style={S.sendToBtnText}>↩ Reply</Text>
                       </Pressable>
                     </View>
@@ -871,4 +877,12 @@ const S = StyleSheet.create({
 
   // Destination pre-filled indicator
   destFilled: { color: C.accentBright, fontSize: 12, fontFamily: 'monospace' },
+
+  // Beacon mode toggle row
+  switchRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 4 },
+  switchLabel: { color: C.textDim, fontSize: 13 },
+
+  // Message card extras
+  msgTitle: { color: C.text, fontSize: 13, fontWeight: '600', fontStyle: 'italic' },
+  mediaBadge: { color: C.accentBright, fontSize: 11, fontFamily: 'monospace', marginTop: 2 },
 });
