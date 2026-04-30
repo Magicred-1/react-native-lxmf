@@ -431,6 +431,7 @@ impl LxmfNode {
         // destination-encrypted packets + link-carried data, see subscription
         // comment above). Mirrors the BLE-mode receiver shape.
         let events_data = Arc::clone(&events);
+        let store_data = store_arc.clone();
         task_handles.push(rt.spawn(async move {
             loop {
                 match data_rx.recv().await {
@@ -439,8 +440,10 @@ impl LxmfNode {
                         src.copy_from_slice(received.destination.as_slice());
                         let data = received.data.as_slice().to_vec();
                         info!("LxmfNode: received {} bytes from {}", data.len(), hex::encode(&src));
+                        let event = lxmf_event_from_bytes(src, data);
+                        persist_inbound_message(&store_data, &event);
                         if let Ok(mut eq) = events_data.lock() {
-                            eq.push_back(lxmf_event_from_bytes(src, data));
+                            eq.push_back(event);
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -453,6 +456,7 @@ impl LxmfNode {
 
         // Spawn resource receiver — handles large messages (>MTU) delivered via resource transfer
         let events_res = Arc::clone(&events);
+        let store_res = store_arc.clone();
         task_handles.push(rt.spawn(async move {
             use rns_transport::resource::ResourceEventKind;
             loop {
@@ -463,8 +467,10 @@ impl LxmfNode {
                             src.copy_from_slice(event.link_id.as_slice());
                             let data = complete.data;
                             info!("LxmfNode: resource complete {} bytes from {}", data.len(), hex::encode(&src));
+                            let lxmf_event = lxmf_event_from_bytes(src, data);
+                            persist_inbound_message(&store_res, &lxmf_event);
                             if let Ok(mut eq) = events_res.lock() {
-                                eq.push_back(lxmf_event_from_bytes(src, data));
+                                eq.push_back(lxmf_event);
                             }
                         }
                     }
@@ -788,6 +794,7 @@ impl LxmfNode {
 
         // Data receiver
         let events_data = Arc::clone(&events);
+        let store_data = store_arc.clone();
         task_handles.push(rt.spawn(async move {
             loop {
                 match data_rx.recv().await {
@@ -796,8 +803,10 @@ impl LxmfNode {
                         src.copy_from_slice(received.destination.as_slice());
                         let data = received.data.as_slice().to_vec();
                         info!("LxmfNode full: received {} bytes from {}", data.len(), hex::encode(&src));
+                        let event = lxmf_event_from_bytes(src, data);
+                        persist_inbound_message(&store_data, &event);
                         if let Ok(mut eq) = events_data.lock() {
-                            eq.push_back(lxmf_event_from_bytes(src, data));
+                            eq.push_back(event);
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -810,6 +819,7 @@ impl LxmfNode {
 
         // Resource receiver (large messages)
         let events_res = Arc::clone(&events);
+        let store_res = store_arc.clone();
         task_handles.push(rt.spawn(async move {
             use rns_transport::resource::ResourceEventKind;
             loop {
@@ -820,8 +830,10 @@ impl LxmfNode {
                             src.copy_from_slice(event.link_id.as_slice());
                             let data = complete.data;
                             info!("LxmfNode full: resource complete {} bytes from {}", data.len(), hex::encode(&src));
+                            let lxmf_event = lxmf_event_from_bytes(src, data);
+                            persist_inbound_message(&store_res, &lxmf_event);
                             if let Ok(mut eq) = events_res.lock() {
-                                eq.push_back(lxmf_event_from_bytes(src, data));
+                                eq.push_back(lxmf_event);
                             }
                         }
                     }
@@ -1157,10 +1169,10 @@ impl LxmfNode {
         let id_hex = private_identity.to_hex_string();
         let id_bytes = private_identity.to_private_key_bytes().to_vec();
 
-        let events = {
+        let (events, store_arc) = {
             let guard = Self::global().lock().map_err(|e| e.to_string())?;
             let node = guard.as_ref().ok_or("Node not initialized")?;
-            Arc::clone(&node.events)
+            (Arc::clone(&node.events), node.store.clone())
         };
 
         let rt = get_runtime();
@@ -1248,6 +1260,7 @@ impl LxmfNode {
 
         // Spawn data receiver.
         let events_data = Arc::clone(&events);
+        let store_data = store_arc.clone();
         task_handles.push(rt.spawn(async move {
             loop {
                 match data_rx.recv().await {
@@ -1256,8 +1269,10 @@ impl LxmfNode {
                         src.copy_from_slice(received.destination.as_slice());
                         let data = received.data.as_slice().to_vec();
                         info!("LxmfNode BLE: received {} bytes", data.len());
+                        let event = lxmf_event_from_bytes(src, data);
+                        persist_inbound_message(&store_data, &event);
                         if let Ok(mut eq) = events_data.lock() {
-                            eq.push_back(lxmf_event_from_bytes(src, data));
+                            eq.push_back(event);
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -1474,6 +1489,19 @@ pub(crate) fn lxmf_event_from_bytes(src: LxmfAddress, data: Vec<u8>) -> LxmfEven
         LxmfEvent::MessageReceived {
             source: src, title: vec![], body: data,
             image: None, files: vec![], timestamp: ts,
+        }
+    }
+}
+
+/// Persist an inbound MessageReceived event to the local SQLite store.
+/// No-op when store is absent or the event variant is not MessageReceived.
+pub(crate) fn persist_inbound_message(store: &Option<Arc<MessageStore>>, event: &LxmfEvent) {
+    let s = match store { Some(s) => s, None => return };
+    if let LxmfEvent::MessageReceived { source, title, body, image, files, timestamp } = event {
+        let dest = [0u8; 16];
+        let img_ref = image.as_ref().map(|(m, d)| (m.as_str(), d.as_slice()));
+        if let Err(e) = s.insert_inbound_message(source, &dest, title, body, img_ref, files, *timestamp) {
+            warn!("persist_inbound_message: SQLite error: {e}");
         }
     }
 }
