@@ -27,7 +27,8 @@ func lxmf_is_running() -> Int32
 func lxmf_send(
     _ destPtr: UnsafePointer<UInt8>?,
     _ bodyPtr: UnsafePointer<UInt8>?,
-    _ bodyLen: Int
+    _ bodyLen: Int,
+    _ fieldsJson: UnsafePointer<CChar>?
 ) -> Int64
 
 @_silgen_name("lxmf_broadcast")
@@ -35,7 +36,8 @@ func lxmf_broadcast(
     _ destsPtr: UnsafePointer<UInt8>?,
     _ destCount: Int,
     _ bodyPtr: UnsafePointer<UInt8>?,
-    _ bodyLen: Int
+    _ bodyLen: Int,
+    _ fieldsJson: UnsafePointer<CChar>?
 ) -> Int64
 
 @_silgen_name("lxmf_poll_events")
@@ -230,22 +232,33 @@ public class LxmfModule: Module {
 
         // --- Messaging ---
 
-        AsyncFunction("send") { (destHex: String, bodyBase64: String) -> Double in
+        AsyncFunction("send") { (destHex: String, bodyBase64: String, fieldsJson: String?) -> Double in
             guard let destBytes = Self.hexToBytes(destHex),
                   destBytes.count == 16,
                   let bodyData = Data(base64Encoded: bodyBase64) else {
                 return -1
             }
 
-            let opId = destBytes.withUnsafeBufferPointer { destBuf in
-                [UInt8](bodyData).withUnsafeBufferPointer { bodyBuf in
-                    lxmf_send(destBuf.baseAddress, bodyBuf.baseAddress, bodyData.count)
+            let opId: Int64
+            if let json = fieldsJson {
+                opId = destBytes.withUnsafeBufferPointer { destBuf in
+                    [UInt8](bodyData).withUnsafeBufferPointer { bodyBuf in
+                        json.withCString { jsonPtr in
+                            lxmf_send(destBuf.baseAddress, bodyBuf.baseAddress, bodyData.count, jsonPtr)
+                        }
+                    }
+                }
+            } else {
+                opId = destBytes.withUnsafeBufferPointer { destBuf in
+                    [UInt8](bodyData).withUnsafeBufferPointer { bodyBuf in
+                        lxmf_send(destBuf.baseAddress, bodyBuf.baseAddress, bodyData.count, nil)
+                    }
                 }
             }
             return Double(opId)
         }
 
-        AsyncFunction("broadcast") { (destsHex: [String], bodyBase64: String) -> Double in
+        AsyncFunction("broadcast") { (destsHex: [String], bodyBase64: String, fieldsJson: String?) -> Double in
             guard let bodyData = Data(base64Encoded: bodyBase64) else { return -1 }
 
             var flatDests = [UInt8]()
@@ -254,9 +267,20 @@ public class LxmfModule: Module {
                 flatDests.append(contentsOf: bytes)
             }
 
-            let opId = flatDests.withUnsafeBufferPointer { destBuf in
-                [UInt8](bodyData).withUnsafeBufferPointer { bodyBuf in
-                    lxmf_broadcast(destBuf.baseAddress, destsHex.count, bodyBuf.baseAddress, bodyData.count)
+            let opId: Int64
+            if let json = fieldsJson {
+                opId = flatDests.withUnsafeBufferPointer { destBuf in
+                    [UInt8](bodyData).withUnsafeBufferPointer { bodyBuf in
+                        json.withCString { jsonPtr in
+                            lxmf_broadcast(destBuf.baseAddress, destsHex.count, bodyBuf.baseAddress, bodyData.count, jsonPtr)
+                        }
+                    }
+                }
+            } else {
+                opId = flatDests.withUnsafeBufferPointer { destBuf in
+                    [UInt8](bodyData).withUnsafeBufferPointer { bodyBuf in
+                        lxmf_broadcast(destBuf.baseAddress, destsHex.count, bodyBuf.baseAddress, bodyData.count, nil)
+                    }
                 }
             }
             return Double(opId)

@@ -726,7 +726,7 @@ impl LxmfNode {
     /// The Reticulum transport then encrypts and routes the packet.
     /// Returns `Ok(seq)` on dispatch or opportunistic queue, `Err` on hard failure.
     /// `seq` is a monotonic counter starting at 0, unique per send attempt.
-    pub fn send_to(dest_hex: &str, content: &[u8]) -> Result<u64, String> {
+    pub fn send_to(dest_hex: &str, content: &[u8], media_json: Option<&str>) -> Result<u64, String> {
         use rns_transport::hash::AddressHash;
         use rns_transport::identity::PrivateIdentity;
         use rns_transport::packet::{Packet, PacketDataBuffer};
@@ -764,7 +764,8 @@ impl LxmfNode {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs_f64();
-        let msgpack = encode_lxmf_msgpack(timestamp, b"", content);
+        let fields_mp = build_fields_msgpack(media_json);
+        let msgpack = encode_lxmf_msgpack(timestamp, b"", content, &fields_mp);
 
         let mut sign_data = Vec::with_capacity(16 + 16 + msgpack.len());
         sign_data.extend_from_slice(&dest_arr);
@@ -1168,37 +1169,126 @@ fn build_app_data(display_name: &str, is_beacon: bool) -> Vec<u8> {
     }
 }
 
-/// Encode LXMF msgpack payload: fixarray(4) [timestamp:f64, title:bin, content:bin, fields:fixmap{}]
-fn encode_lxmf_msgpack(timestamp: f64, title: &[u8], content: &[u8]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(1 + 9 + 2 + title.len() + 2 + content.len() + 1);
+/// Encode LXMF msgpack payload: fixarray(4) [timestamp:f64, title:bin, content:bin, fields:map]
+fn encode_lxmf_msgpack(timestamp: f64, title: &[u8], content: &[u8], fields_mp: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(1 + 9 + 2 + title.len() + 2 + content.len() + fields_mp.len());
 
-    // fixarray with 4 elements: 0x94
-    buf.push(0x94);
+    buf.push(0x94); // fixarray(4)
 
-    // timestamp as float64 (0xcb)
-    buf.push(0xcb);
+    buf.push(0xcb); // float64
     buf.extend_from_slice(&timestamp.to_bits().to_be_bytes());
 
-    // title as bin8
-    buf.push(0xc4);
-    buf.push(title.len() as u8);
-    buf.extend_from_slice(title);
-
-    // content as bin8 (or bin16 if > 255 bytes)
-    if content.len() <= 255 {
-        buf.push(0xc4);
-        buf.push(content.len() as u8);
-    } else {
-        buf.push(0xc5);
-        buf.push((content.len() >> 8) as u8);
-        buf.push((content.len() & 0xff) as u8);
-    }
-    buf.extend_from_slice(content);
-
-    // fields: fixmap with 0 entries (0x80)
-    buf.push(0x80);
+    buf.extend_from_slice(&mp_bin(title));
+    buf.extend_from_slice(&mp_bin(content));
+    buf.extend_from_slice(fields_mp);
 
     buf
+}
+
+/// Build LXMF fields msgpack from optional media JSON.
+///
+/// JSON shape: `{"image":{"mimeType":"image/jpeg","data":"<base64>"},
+///               "files":[{"name":"x.pdf","data":"<base64>"}]}`
+///
+/// Produces a msgpack map keyed by LXMF field IDs:
+///   0x05 = FIELD_FILE_ATTACHMENTS: [[name_str, data_bin], ...]
+///   0x06 = FIELD_IMAGE: [mime_str, data_bin]
+fn build_fields_msgpack(media_json: Option<&str>) -> Vec<u8> {
+    use base64::Engine as _;
+
+    let json_str = match media_json {
+        Some(s) if !s.trim_matches(|c| c == ' ' || c == '\0').is_empty()
+                   && s != "null" && s != "{}" => s,
+        _ => return vec![0x80],
+    };
+
+    let v: serde_json::Value = match serde_json::from_str(json_str) {
+        Ok(v) => v,
+        Err(_) => return vec![0x80],
+    };
+    let obj = match v.as_object() {
+        Some(o) if !o.is_empty() => o,
+        _ => return vec![0x80],
+    };
+
+    let mut fields: Vec<(u8, Vec<u8>)> = Vec::new();
+
+    // FIELD_IMAGE (0x06): [mime_str, data_bin]
+    if let Some(img) = obj.get("image").and_then(|v| v.as_object()) {
+        let mime = img.get("mimeType").and_then(|v| v.as_str()).unwrap_or("image/jpeg");
+        let data_b64 = img.get("data").and_then(|v| v.as_str()).unwrap_or("");
+        if let Ok(data) = base64::engine::general_purpose::STANDARD.decode(data_b64) {
+            let mut val = vec![0x92u8]; // fixarray(2)
+            val.extend_from_slice(&mp_str(mime.as_bytes()));
+            val.extend_from_slice(&mp_bin(&data));
+            fields.push((0x06, val));
+        }
+    }
+
+    // FIELD_FILE_ATTACHMENTS (0x05): [[name_str, data_bin], ...]
+    if let Some(files) = obj.get("files").and_then(|v| v.as_array()) {
+        let entries: Vec<Vec<u8>> = files.iter().filter_map(|f| {
+            let name = f.get("name").and_then(|v| v.as_str())?;
+            let data = base64::engine::general_purpose::STANDARD
+                .decode(f.get("data").and_then(|v| v.as_str()).unwrap_or("")).ok()?;
+            let mut e = vec![0x92u8]; // fixarray(2)
+            e.extend_from_slice(&mp_str(name.as_bytes()));
+            e.extend_from_slice(&mp_bin(&data));
+            Some(e)
+        }).collect();
+
+        if !entries.is_empty() {
+            let arr = mp_array(&entries);
+            fields.push((0x05, arr));
+        }
+    }
+
+    if fields.is_empty() {
+        return vec![0x80];
+    }
+
+    let mut out = Vec::new();
+    out.push(0x80 | fields.len() as u8); // fixmap(n)
+    for (id, val) in &fields {
+        out.push(*id); // fixint key
+        out.extend_from_slice(val);
+    }
+    out
+}
+
+fn mp_bin(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    match data.len() {
+        0..=255 => { out.push(0xc4); out.push(data.len() as u8); }
+        256..=65535 => { out.push(0xc5); out.push((data.len() >> 8) as u8); out.push((data.len() & 0xff) as u8); }
+        _ => { out.push(0xc6); out.extend_from_slice(&(data.len() as u32).to_be_bytes()); }
+    }
+    out.extend_from_slice(data);
+    out
+}
+
+fn mp_str(s: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    match s.len() {
+        0..=31  => out.push(0xa0 | s.len() as u8),
+        32..=255 => { out.push(0xd9); out.push(s.len() as u8); }
+        _ => { out.push(0xda); out.push((s.len() >> 8) as u8); out.push((s.len() & 0xff) as u8); }
+    }
+    out.extend_from_slice(s);
+    out
+}
+
+fn mp_array(entries: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    if entries.len() <= 15 {
+        out.push(0x90 | entries.len() as u8);
+    } else {
+        out.push(0xdc);
+        out.push((entries.len() >> 8) as u8);
+        out.push((entries.len() & 0xff) as u8);
+    }
+    for e in entries { out.extend_from_slice(e); }
+    out
 }
 
 /// Parse a JSON interfaces array: `[{"host":"...","port":1234}, ...]`

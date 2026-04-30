@@ -47,6 +47,17 @@ export interface TcpInterface {
   port: number;
 }
 
+/** Media attachments to include in an LXMF message.
+ *  Encoded as LXMF standard fields: FIELD_IMAGE (0x06) and FIELD_FILE_ATTACHMENTS (0x05).
+ *  Compatible with Sideband and other LXMF clients.
+ */
+export interface LxmfMedia {
+  /** Inline image: LXMF FIELD_IMAGE — rendered by receiving clients. */
+  image?: { mimeType: string; dataBase64: string };
+  /** File attachments: LXMF FIELD_FILE_ATTACHMENTS — list of named blobs. */
+  files?: { name: string; dataBase64: string }[];
+}
+
 export interface UseLxmfOptions {
   autoStart?: boolean;
   identityHex?: string;
@@ -260,18 +271,20 @@ export function useLxmf(options: UseLxmfOptions = {}) {
     }
   }, []);
 
-  const send = useCallback(async (destHex: string, bodyBase64: string) => {
+  const send = useCallback(async (destHex: string, bodyBase64: string, media?: LxmfMedia) => {
     try {
-      return await LxmfModule.send(destHex, bodyBase64);
+      const fieldsJson = media ? JSON.stringify(media) : null;
+      return await LxmfModule.send(destHex, bodyBase64, fieldsJson);
     } catch (e: any) {
       setError(e.message);
       return -1;
     }
   }, []);
 
-  const broadcast = useCallback(async (destsHex: string[], bodyBase64: string) => {
+  const broadcast = useCallback(async (destsHex: string[], bodyBase64: string, media?: LxmfMedia) => {
     try {
-      return await LxmfModule.broadcast(destsHex, bodyBase64);
+      const fieldsJson = media ? JSON.stringify(media) : null;
+      return await LxmfModule.broadcast(destsHex, bodyBase64, fieldsJson);
     } catch (e: any) {
       setError(e.message);
       return -1;

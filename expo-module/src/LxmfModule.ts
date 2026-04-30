@@ -24,8 +24,8 @@ export type NativeModuleType = {
   isRunning(): boolean;
 
   // Messaging
-  send(destHex: string, bodyBase64: string): Promise<number>;
-  broadcast(destsHex: string[], bodyBase64: string): Promise<number>;
+  send(destHex: string, bodyBase64: string, fieldsJson?: string | null): Promise<number>;
+  broadcast(destsHex: string[], bodyBase64: string, fieldsJson?: string | null): Promise<number>;
 
   // Identity (returns full 128-char private key hex for persistence; null if no node)
   getIdentityHex(): string | null;

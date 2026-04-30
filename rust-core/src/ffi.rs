@@ -211,15 +211,19 @@ pub unsafe extern "C" fn lxmf_send(
     dest_ptr: *const u8,
     body_ptr: *const u8,
     body_len: usize,
+    fields_json: *const c_char,
 ) -> i64 {
     if dest_ptr.is_null() || body_ptr.is_null() { return -1; }
-    if body_len > 65536 { return -1; } // sanity cap
+    if body_len > 65536 { return -1; }
 
     let dest_bytes = slice::from_raw_parts(dest_ptr, 16);
     let dest_hex = hex::encode(dest_bytes);
     let body = slice::from_raw_parts(body_ptr, body_len);
+    let media = if fields_json.is_null() { None } else {
+        CStr::from_ptr(fields_json).to_str().ok()
+    };
 
-    match LxmfNode::send_to(&dest_hex, body) {
+    match LxmfNode::send_to(&dest_hex, body, media) {
         Ok(seq) => seq as i64,
         Err(e) => {
             warn!("lxmf_send failed: {}", e);
@@ -242,6 +246,7 @@ pub unsafe extern "C" fn lxmf_broadcast(
     dest_count: usize,
     body_ptr: *const u8,
     body_len: usize,
+    fields_json: *const c_char,
 ) -> i64 {
     if dests_ptr.is_null() || body_ptr.is_null() { return -1; }
     if dest_count == 0 { return 0; }
@@ -249,11 +254,14 @@ pub unsafe extern "C" fn lxmf_broadcast(
 
     let dests = slice::from_raw_parts(dests_ptr, dest_count * 16);
     let body = slice::from_raw_parts(body_ptr, body_len);
+    let media = if fields_json.is_null() { None } else {
+        CStr::from_ptr(fields_json).to_str().ok()
+    };
 
     let mut sent: i64 = 0;
     for i in 0..dest_count {
         let dest_hex = hex::encode(&dests[i * 16..(i + 1) * 16]);
-        if LxmfNode::send_to(&dest_hex, body).is_ok() {
+        if LxmfNode::send_to(&dest_hex, body, media).is_ok() {
             sent += 1;
         }
     }

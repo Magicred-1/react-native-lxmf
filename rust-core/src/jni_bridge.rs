@@ -222,6 +222,7 @@ pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeSend(
     _class: JClass,
     dest_hex: JString,
     body_base64: JString,
+    fields_json: JString,
 ) -> jlong {
     let dest: String = match env.get_string(&dest_hex) {
         Ok(s) => s.into(),
@@ -230,6 +231,9 @@ pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeSend(
     let body_b64: String = match env.get_string(&body_base64) {
         Ok(s) => s.into(),
         Err(_) => { throw_err(&mut env, "nativeSend: invalid body_base64 string"); return -1; }
+    };
+    let media_str: Option<String> = if fields_json.is_null() { None } else {
+        env.get_string(&fields_json).ok().map(|s| s.into())
     };
 
     use base64::Engine as _;
@@ -241,7 +245,7 @@ pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeSend(
         }
     };
 
-    match LxmfNode::send_to(&dest, &data) {
+    match LxmfNode::send_to(&dest, &data, media_str.as_deref()) {
         Ok(seq) => seq as jlong,
         Err(e) => {
             error!("LxmfModule: send_to failed: {}", e);
@@ -256,8 +260,8 @@ pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeBroadcast(
     _class: JClass,
     dests_json: JString,
     body_base64: JString,
+    fields_json: JString,
 ) -> jlong {
-    // Broadcast = send to each destination in the JSON array
     let dests_str: String = match env.get_string(&dests_json) {
         Ok(s) => s.into(),
         Err(_) => { throw_err(&mut env, "nativeBroadcast: invalid dests_json string"); return -1; }
@@ -265,6 +269,9 @@ pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeBroadcast(
     let body_b64: String = match env.get_string(&body_base64) {
         Ok(s) => s.into(),
         Err(_) => { throw_err(&mut env, "nativeBroadcast: invalid body_base64 string"); return -1; }
+    };
+    let media_str: Option<String> = if fields_json.is_null() { None } else {
+        env.get_string(&fields_json).ok().map(|s| s.into())
     };
 
     use base64::Engine as _;
@@ -286,7 +293,7 @@ pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeBroadcast(
 
     let mut sent: i64 = 0;
     for dest in &dests {
-        match LxmfNode::send_to(dest, &data) {
+        match LxmfNode::send_to(dest, &data, media_str.as_deref()) {
             Ok(_) => sent += 1,
             Err(e) => error!("LxmfModule: broadcast send_to {} failed: {}", dest, e),
         }

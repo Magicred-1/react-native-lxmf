@@ -92,13 +92,13 @@ class LxmfModule : Module() {
     }
 
     // Messaging
-    AsyncFunction("send") { destHex: String, bodyBase64: String ->
-      nativeSend(destHex, bodyBase64).toDouble()
+    AsyncFunction("send") { destHex: String, bodyBase64: String, fieldsJson: String? ->
+      nativeSend(destHex, bodyBase64, fieldsJson).toDouble()
     }
 
-    AsyncFunction("broadcast") { destsHex: List<String>, bodyBase64: String ->
+    AsyncFunction("broadcast") { destsHex: List<String>, bodyBase64: String, fieldsJson: String? ->
       val destsJson = org.json.JSONArray(destsHex).toString()
-      nativeBroadcast(destsJson, bodyBase64).toDouble()
+      nativeBroadcast(destsJson, bodyBase64, fieldsJson).toDouble()
     }
 
     // Identity
@@ -202,8 +202,8 @@ class LxmfModule : Module() {
   private external fun nativeStop(): Int
   private external fun nativeIsRunning(): Boolean
   private external fun nativePollEvents(): String?
-  private external fun nativeSend(destHex: String, bodyBase64: String): Long
-  private external fun nativeBroadcast(destsJson: String, bodyBase64: String): Long
+  private external fun nativeSend(destHex: String, bodyBase64: String, fieldsJson: String?): Long
+  private external fun nativeBroadcast(destsJson: String, bodyBase64: String, fieldsJson: String?): Long
   private external fun nativeGetIdentityHex(): String?
   private external fun nativeGetStatus(): String?
   private external fun nativeGetBeacons(): String?
