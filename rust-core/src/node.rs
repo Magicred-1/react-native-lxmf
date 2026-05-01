@@ -1072,6 +1072,19 @@ impl LxmfNode {
                 if let Ok(mut eq) = events.lock() {
                     eq.push_back(LxmfEvent::MessageQueued { seq, dest_hex: dest_hex.to_string() });
                 }
+                // Trigger a Reticulum path request so the peer re-announces and
+                // populates the transport's identity table — enabling the queued
+                // message to be delivered at the next announce_rx event rather
+                // than waiting for the peer's next periodic announce (up to 60s).
+                let transport_path = Arc::clone(&transport_for_link);
+                let dest_hex_owned = dest_hex.to_string();
+                get_runtime().spawn(async move {
+                    use rns_transport::hash::AddressHash;
+                    info!("LxmfNode::send_to: sending path request for {}", dest_hex_owned);
+                    transport_path.lock().await.request_path(
+                        &AddressHash::new(dest_arr), None, None,
+                    ).await;
+                });
                 Ok(seq)
             }
             SendPacketOutcome::DroppedNoRoute => {
