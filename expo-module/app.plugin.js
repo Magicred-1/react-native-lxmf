@@ -23,7 +23,7 @@ function withLxmfPermissions(config) {
     return c;
   });
 
-  // iOS BLE usage descriptions
+  // iOS BLE usage descriptions + background modes required for background scanning/advertising
   config = withInfoPlist(config, (c) => {
     c.modResults.NSBluetoothAlwaysUsageDescription =
       c.modResults.NSBluetoothAlwaysUsageDescription ||
@@ -31,6 +31,13 @@ function withLxmfPermissions(config) {
     c.modResults.NSBluetoothPeripheralUsageDescription =
       c.modResults.NSBluetoothPeripheralUsageDescription ||
       'Used for LXMF mesh networking via BLE';
+    // Required for CoreBluetooth state restoration and background BLE operation.
+    // Without these entries the OS terminates BLE scanning/advertising when the
+    // app goes to background, breaking the Reticulum mesh.
+    const bg = c.modResults.UIBackgroundModes || [];
+    if (!bg.includes('bluetooth-central'))   bg.push('bluetooth-central');
+    if (!bg.includes('bluetooth-peripheral')) bg.push('bluetooth-peripheral');
+    c.modResults.UIBackgroundModes = bg;
     return c;
   });
 
