@@ -76,7 +76,7 @@ pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeStart(
         env.get_string(&display_name).ok().map(|s| s.into()).unwrap_or_default()
     };
 
-    error!("LxmfModule: starting node mode={} interfaces={} name={} beacon={}", mode, interfaces_json, display_name_str, is_beacon != 0);
+    log::info!("LxmfModule: starting node mode={} interfaces={} name={} beacon={}", mode, interfaces_json, display_name_str, is_beacon != 0);
 
     match LxmfNode::start(
         &id_str,
@@ -89,7 +89,7 @@ pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeStart(
         is_beacon != 0,
     ) {
         Ok(()) => {
-            error!("LxmfModule: node started successfully");
+            log::info!("LxmfModule: node started successfully");
             0
         }
         Err(e) => {
@@ -183,7 +183,7 @@ pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeGetBeacons(
         Some(n) => n,
         None => return std::ptr::null_mut(),
     };
-    let json = node.beacon_mgr.beacons_json();
+    let json = node.beacon_mgr.lock().map(|m| m.beacons_json()).unwrap_or_else(|_| "[]".to_string());
     match env.new_string(&json) {
         Ok(s) => s.into_raw(),
         Err(_) => std::ptr::null_mut(),
@@ -299,6 +299,67 @@ pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeBroadcast(
         }
     }
     sent
+}
+
+// --- Beacon RPC ---
+
+/// Queue a JSON-RPC 2.0 call to a specific beacon via its dest hash hex.
+///
+/// `dest_hash_hex` — 32-char hex of the 16-byte beacon dest hash.
+/// `method`        — JSON-RPC method name (e.g. "getLatestBlockhash").
+/// `params_json`   — JSON-encoded params array (e.g. `[{"commitment":"confirmed"}]`).
+///
+/// Returns the correlation id (>= 1) which will appear in `LxmfEvent::RpcResponse`.
+/// Returns -1 on error (bad dest, unparseable params, not initialized).
+#[no_mangle]
+pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeBeaconRpc(
+    mut env: JNIEnv,
+    _class: JClass,
+    dest_hash_hex: JString,
+    method: JString,
+    params_json: JString,
+) -> jlong {
+    let dest_str: String = match env.get_string(&dest_hash_hex) {
+        Ok(s) => s.into(),
+        Err(_) => { throw_err(&mut env, "nativeBeaconRpc: invalid dest_hash_hex"); return -1; }
+    };
+    let method_str: String = match env.get_string(&method) {
+        Ok(s) => s.into(),
+        Err(_) => { throw_err(&mut env, "nativeBeaconRpc: invalid method"); return -1; }
+    };
+    let params_str: String = if params_json.is_null() {
+        "[]".to_string()
+    } else {
+        env.get_string(&params_json).ok().map(|s| s.into()).unwrap_or_else(|| "[]".to_string())
+    };
+
+    let dest_bytes = match hex::decode(&dest_str) {
+        Ok(b) if b.len() == 16 => b,
+        _ => { throw_err(&mut env, "nativeBeaconRpc: dest_hash_hex must be 32 hex chars"); return -1; }
+    };
+    let mut dest: crate::node::DestHash = [0u8; 16];
+    dest.copy_from_slice(&dest_bytes);
+
+    let params: serde_json::Value = match serde_json::from_str(&params_str) {
+        Ok(v) => v,
+        Err(e) => {
+            throw_err(&mut env, &format!("nativeBeaconRpc: params_json parse failed: {e}"));
+            return -1;
+        }
+    };
+
+    let guard = match LxmfNode::global().lock() {
+        Ok(g) => g,
+        Err(_) => return -1,
+    };
+    let node = match guard.as_ref() {
+        Some(n) => n,
+        None => return -1,
+    };
+    match node.beacon_mgr.lock() {
+        Ok(mut mgr) => mgr.queue_rpc(dest, &method_str, params) as jlong,
+        Err(_) => -1,
+    }
 }
 
 // --- Config ---

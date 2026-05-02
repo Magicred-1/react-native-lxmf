@@ -1,21 +1,16 @@
-import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import * as SecureStore from 'expo-secure-store';
 import { documentDirectory } from 'expo-file-system/legacy';
 import {
   useLxmf,
-  LxmfModule,
   LxmfNodeMode,
   type LxmfEvent,
-  type LxmfMedia,
   type LxmfNodeStatus,
 } from '@magicred-1/react-native-lxmf';
 
-// Strip file:// URI prefix so rusqlite gets a raw filesystem path.
 const DB_PATH = documentDirectory
   ? documentDirectory.replace('file://', '') + 'lxmf.db'
   : undefined;
-
-// ── Persistence keys ─────────────────────────────────────────────────────────
 
 const IDENTITY_KEY = 'lxmf.identity.v1';
 const CONTACTS_KEY = 'lxmf.contacts.v1';
@@ -51,30 +46,29 @@ export type StoredMessage = {
   files?: { name: string; data: string }[];
 };
 
-// ── Context value ─────────────────────────────────────────────────────────────
+// ── Context ───────────────────────────────────────────────────────────────────
 
 export type LxmfContextValue = {
+  // Node state
   isNativeAvailable: boolean;
   isRunning: boolean;
   status: LxmfNodeStatus | null;
   error: string | null;
   events: LxmfEvent[];
+  // Node control
   start: (overrides?: {
     identityHex?: string;
     lxmfAddressHex?: string;
     mode?: LxmfNodeMode;
     tcpInterfaces?: { host: string; port: number }[];
     displayName?: string;
-    isBeacon?: boolean;
   }) => Promise<boolean>;
   stop: () => Promise<void>;
-  send: (dest: string, body: string, media?: LxmfMedia) => Promise<number>;
-  broadcast: (dests: string[], body: string, media?: LxmfMedia) => Promise<number>;
-  fetchMessages: (limit?: number) => StoredMessage[];
   getStatus: () => LxmfNodeStatus | null;
-  getIdentityHex: () => string | null;
-  bleUnpairedRNodeCount: () => number;
   setLogLevel: (level: number) => void;
+  // Messaging
+  send: (dest: string, body: string) => Promise<number>;
+  fetchMessages: (limit?: number) => StoredMessage[];
   // Identity
   identity: StoredIdentity | null;
   identityHydrated: boolean;
@@ -114,17 +108,32 @@ function tryJson<T>(raw: string | null, fallback: T): T {
   try { return JSON.parse(raw) as T; } catch { return fallback; }
 }
 
+function b64preview(b64: string, maxLen = 60): string {
+  try {
+    const bytes = Uint8Array.from(globalThis.atob(b64), c => c.codePointAt(0) ?? 0);
+    const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+    return text.length > maxLen ? text.slice(0, maxLen) + '…' : text;
+  } catch {
+    return '';
+  }
+}
+
+function sortedContacts(map: Record<string, Contact>): Contact[] {
+  return Object.values(map).sort((a, b) => b.lastSeen - a.lastSeen);
+}
+
 // ── Provider ──────────────────────────────────────────────────────────────────
 
-export function LxmfProvider({ children }: { children: React.ReactNode }) {
+export function LxmfProvider({ children }: { readonly children: React.ReactNode }) {
   const [identity, setIdentity] = useState<StoredIdentity | null>(null);
   const [identityHydrated, setIdentityHydrated] = useState(false);
   const [displayName, setDisplayNameState] = useState('lxmf-mobile');
   const [contacts, setContacts] = useState<Contact[]>([]);
   const contactMapRef = useRef<Record<string, Contact>>({});
+  // Tracks the most recent processed event so the effect only processes new ones.
   const lastEventRef = useRef<LxmfEvent | null>(null);
 
-  // Hydrate from SecureStore on mount
+  // Load persisted state on mount
   useEffect(() => {
     (async () => {
       try {
@@ -153,7 +162,7 @@ export function LxmfProvider({ children }: { children: React.ReactNode }) {
     logLevel: 3,
   });
 
-  // Persist identity whenever the node reports a new one
+  // Persist identity whenever the running node reports one
   const identityHexRef = useRef<string | null>(null);
   useEffect(() => {
     if (!lxmf.isRunning) return;
@@ -202,25 +211,25 @@ export function LxmfProvider({ children }: { children: React.ReactNode }) {
     }
   }, [persistContacts]);
 
-  // Process incoming events for contact list updates
+  // Update contacts from incoming events. Iterates all events newer than the
+  // last-seen one so batch deliveries (multiple events per poll) aren't missed.
   useEffect(() => {
-    const latest = lxmf.events[0];
-    if (!latest || latest === lastEventRef.current) return;
-    lastEventRef.current = latest;
+    for (const event of lxmf.events) {
+      if (event === lastEventRef.current) break;
 
-    if (latest.type === 'announceReceived') {
-      const addr = String(latest.destHash ?? latest.address ?? '');
-      if (!addr || addr.length !== 32) return;
-      const name = latest.appData ? String(latest.appData) : undefined;
-      upsertContact(addr, { name });
+      if (event.type === 'announceReceived') {
+        const addr = String(event.destHash ?? event.address ?? '');
+        if (addr.length === 32) {
+          upsertContact(addr, { name: event.appData ? String(event.appData) : undefined });
+        }
+      } else if (event.type === 'messageReceived') {
+        const addr = String(event.source ?? '');
+        if (addr.length === 32) {
+          upsertContact(addr, { lastMessage: event.body ? b64preview(String(event.body)) : '' });
+        }
+      }
     }
-
-    if (latest.type === 'messageReceived') {
-      const addr = String(latest.source ?? '');
-      if (!addr || addr.length !== 32) return;
-      const body = latest.body ? b64preview(String(latest.body)) : '';
-      upsertContact(addr, { lastMessage: body });
-    }
+    if (lxmf.events.length > 0) lastEventRef.current = lxmf.events[0];
   }, [lxmf.events, upsertContact]);
 
   const setDisplayName = useCallback((name: string) => {
@@ -236,54 +245,51 @@ export function LxmfProvider({ children }: { children: React.ReactNode }) {
 
   const fetchMessages = useCallback((limit = 50): StoredMessage[] => {
     try {
-      const raw: any[] = lxmf.fetchMessages(limit);
-      return raw as StoredMessage[];
+      return lxmf.fetchMessages(limit) as StoredMessage[];
     } catch {
       return [];
     }
   }, [lxmf.fetchMessages]);
 
+  // lxmf.send expects body as base64 (JNI decodes it to raw bytes before LXMF framing).
+  // This wrapper accepts plain UTF-8 text and encodes it so callers don't need to know the wire format.
+  const lxmfSend = lxmf.send;
+  const send = useCallback(async (dest: string, body: string): Promise<number> => {
+    const bytes = new TextEncoder().encode(body);
+    const b64 = btoa(String.fromCodePoint(...bytes));
+    return lxmfSend(dest, b64);
+  }, [lxmfSend]);
+
+  const value = useMemo<LxmfContextValue>(() => ({
+    isNativeAvailable: lxmf.isNativeAvailable,
+    isRunning: lxmf.isRunning,
+    status: lxmf.status,
+    error: lxmf.error,
+    events: lxmf.events,
+    start: lxmf.start,
+    stop: lxmf.stop,
+    getStatus: lxmf.getStatus,
+    setLogLevel: lxmf.setLogLevel,
+    send,
+    fetchMessages,
+    identity,
+    identityHydrated,
+    clearIdentity,
+    displayName,
+    setDisplayName,
+    contacts,
+    upsertContact,
+    markRead,
+  }), [
+    lxmf.isNativeAvailable, lxmf.isRunning, lxmf.status, lxmf.error, lxmf.events,
+    lxmf.start, lxmf.stop, lxmf.getStatus, lxmf.setLogLevel,
+    send, fetchMessages, identity, identityHydrated, clearIdentity,
+    displayName, setDisplayName, contacts, upsertContact, markRead,
+  ]);
+
   return (
-    <LxmfContext.Provider value={{
-      isNativeAvailable: lxmf.isNativeAvailable,
-      isRunning: lxmf.isRunning,
-      status: lxmf.status,
-      error: lxmf.error,
-      events: lxmf.events,
-      start: lxmf.start,
-      stop: lxmf.stop,
-      send: lxmf.send,
-      broadcast: lxmf.broadcast,
-      fetchMessages,
-      getStatus: lxmf.getStatus,
-      getIdentityHex: lxmf.getIdentityHex,
-      bleUnpairedRNodeCount: lxmf.bleUnpairedRNodeCount,
-      setLogLevel: lxmf.setLogLevel,
-      identity,
-      identityHydrated,
-      clearIdentity,
-      displayName,
-      setDisplayName,
-      contacts,
-      upsertContact,
-      markRead,
-    }}>
+    <LxmfContext.Provider value={value}>
       {children}
     </LxmfContext.Provider>
   );
-}
-
-function sortedContacts(map: Record<string, Contact>): Contact[] {
-  return Object.values(map).sort((a, b) => b.lastSeen - a.lastSeen);
-}
-
-function b64preview(b64: string, maxLen = 60): string {
-  try {
-    const bin = globalThis.atob(b64);
-    const bytes = Uint8Array.from(bin, c => c.codePointAt(0) ?? 0);
-    const text = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-    return text.length > maxLen ? text.slice(0, maxLen) + '…' : text;
-  } catch {
-    return '';
-  }
 }

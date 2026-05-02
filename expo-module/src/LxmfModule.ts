@@ -35,6 +35,9 @@ export type NativeModuleType = {
   getBeacons(): string | null;
   fetchMessages(limit: number): string | null;
 
+  // Beacon RPC — queue a JSON-RPC 2.0 call to a beacon; response arrives as onRpcResponse event.
+  beaconRpc(destHashHex: string, method: string, paramsJson?: string | null): Promise<number>;
+
   // Configuration
   setLogLevel(level: number): boolean;
   abiVersion(): number;
@@ -44,6 +47,10 @@ export type NativeModuleType = {
   stopBLE(): boolean;
   blePeerCount(): number;
   bleUnpairedRNodeCount(): number;
+
+  // RNode pairing — NUS/KISS BLE path
+  getNusUnpairedRNodes(): string;
+  pairNusRNode(mac: string): boolean;
 }
 
 const MISSING_NATIVE_MESSAGE =
@@ -74,6 +81,9 @@ const missingNativeShim: NativeModuleType = {
   stopBLE: () => throwMissingNative(),
   blePeerCount: () => throwMissingNative(),
   bleUnpairedRNodeCount: () => throwMissingNative(),
+  beaconRpc: async () => throwMissingNative(),
+  getNusUnpairedRNodes: () => throwMissingNative(),
+  pairNusRNode: () => throwMissingNative(),
 } as NativeModuleType;
 
 export const LxmfModule = LxmfModuleNative ?? missingNativeShim;

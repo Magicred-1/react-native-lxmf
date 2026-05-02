@@ -138,7 +138,7 @@ pub unsafe extern "C" fn lxmf_get_beacons(out_buf: *mut u8, out_capacity: usize)
         None => return STATUS_NOT_INIT,
     };
 
-    let json = node.beacon_mgr.beacons_json();
+    let json = node.beacon_mgr.lock().map(|m| m.beacons_json()).unwrap_or_else(|_| "[]".to_string());
     let bytes = json.as_bytes();
     if bytes.len() > out_capacity { return STATUS_ERR; }
     std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
@@ -166,8 +166,59 @@ pub unsafe extern "C" fn lxmf_on_announce(
         None => return STATUS_NOT_INIT,
     };
 
-    node.beacon_mgr.on_announce_received(dest_hash, app_data);
+    if let Ok(mut mgr) = node.beacon_mgr.lock() { mgr.on_announce_received(dest_hash, app_data); }
     STATUS_OK
+}
+
+/// Queue a JSON-RPC 2.0 call to a specific beacon.
+///
+/// `dest_hash_hex` — null-terminated 32-char hex string of the 16-byte beacon dest hash.
+/// `method`        — null-terminated method name.
+/// `params_json`   — null-terminated JSON params array, or NULL for `[]`.
+///
+/// Returns the u32 correlation id (cast to i64, always >= 1) on success.
+/// Returns -1 on error. The response arrives as `LxmfEvent::RpcResponse` via `lxmf_poll_events`.
+#[no_mangle]
+pub unsafe extern "C" fn lxmf_beacon_rpc(
+    dest_hash_hex: *const c_char,
+    method: *const c_char,
+    params_json: *const c_char,
+) -> i64 {
+    if dest_hash_hex.is_null() || method.is_null() { return -1; }
+
+    let dest_str = match CStr::from_ptr(dest_hash_hex).to_str() { Ok(s) => s, Err(_) => return -1 };
+    let method_str = match CStr::from_ptr(method).to_str() { Ok(s) => s, Err(_) => return -1 };
+    let params_str = if params_json.is_null() {
+        "[]"
+    } else {
+        match CStr::from_ptr(params_json).to_str() { Ok(s) => s, Err(_) => return -1 }
+    };
+
+    let dest_bytes = match hex::decode(dest_str) {
+        Ok(b) if b.len() == 16 => b,
+        _ => return -1,
+    };
+    let mut dest: crate::node::DestHash = [0u8; 16];
+    dest.copy_from_slice(&dest_bytes);
+
+    let params: serde_json::Value = match serde_json::from_str(params_str) {
+        Ok(v) => v,
+        Err(_) => return -1,
+    };
+
+    let guard = match crate::node::LxmfNode::global().lock() {
+        Ok(g) => g,
+        Err(_) => return -1,
+    };
+    let node = match guard.as_ref() {
+        Some(n) => n,
+        None => return -1,
+    };
+    let rpc_id = match node.beacon_mgr.lock() {
+        Ok(mut mgr) => mgr.queue_rpc(dest, method_str, params) as i64,
+        Err(_) => -1,
+    };
+    rpc_id
 }
 
 // --- Messages ---
@@ -487,6 +538,10 @@ fn events_to_json(events: &[crate::node::LxmfEvent]) -> String {
         }),
         LxmfEvent::Error { code, message } => serde_json::json!({
             "type": "error", "code": code, "message": message,
+        }),
+        LxmfEvent::RpcResponse { id, method, result_json, is_error } => serde_json::json!({
+            "type": "rpcResponse", "id": id, "method": method,
+            "resultJson": result_json, "isError": is_error,
         }),
     }).collect();
 

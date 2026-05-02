@@ -50,6 +50,8 @@ pub enum LxmfEvent {
     MessageFailed { seq: u64, dest_hex: String, reason: String },
     Log { level: u32, message: String },
     Error { code: u32, message: String },
+    /// Result of a JSON-RPC call dispatched through a beacon.
+    RpcResponse { id: u32, method: String, result_json: String, is_error: bool },
 }
 
 pub type EventQueue = Arc<Mutex<VecDeque<LxmfEvent>>>;
@@ -83,8 +85,8 @@ struct PendingSend {
 pub struct LxmfNode {
     /// Event queue polled by native layer
     pub events: EventQueue,
-    /// Beacon manager
-    pub beacon_mgr: BeaconManager,
+    /// Beacon manager — Arc so async tasks can share it without the global lock.
+    pub beacon_mgr: Arc<std::sync::Mutex<BeaconManager>>,
     /// Message persistence
     pub store: Option<Arc<MessageStore>>,
     /// Running state
@@ -137,7 +139,7 @@ impl LxmfNode {
 
         let node = LxmfNode {
             events: Arc::new(Mutex::new(VecDeque::with_capacity(256))),
-            beacon_mgr: BeaconManager::new(),
+            beacon_mgr: Arc::new(std::sync::Mutex::new(BeaconManager::new())),
             store,
             running: false,
             identity_hex: String::new(),
@@ -313,6 +315,11 @@ impl LxmfNode {
             let node = guard.as_ref().ok_or("Node not initialized")?;
             (Arc::clone(&node.pending_sends), Arc::clone(&node.peer_identities))
         };
+        let beacon_arc = {
+            let guard = Self::global().lock().map_err(|e| e.to_string())?;
+            let node = guard.as_ref().ok_or("Node not initialized")?;
+            Arc::clone(&node.beacon_mgr)
+        };
         let transport_for_ann = Arc::clone(&transport_arc);
 
         let store_arc: Option<Arc<MessageStore>> = {
@@ -341,6 +348,7 @@ impl LxmfNode {
         let store_ann = store_arc.clone();
         let pending_for_ann_task = Arc::clone(&pending_for_ann);
         let peer_ids_ann = Arc::clone(&peer_ids_arc);
+        let beacon_arc_ann = Arc::clone(&beacon_arc);
         let mut announce_rx = announce_rx;
         task_handles.push(rt.spawn(async move {
             let pending_for_ann = pending_for_ann_task;
@@ -359,6 +367,11 @@ impl LxmfNode {
                         // Cache peer identity for large-payload link sends
                         if let Ok(mut ids) = peer_ids_ann.lock() {
                             ids.insert(dh, desc);
+                        }
+
+                        // Track beacon announces for RPC dispatch
+                        if let Ok(mut mgr) = beacon_arc_ann.lock() {
+                            mgr.on_announce_received(dh, &app_data);
                         }
 
                         // Flush any queued opportunistic sends for this peer
@@ -434,15 +447,54 @@ impl LxmfNode {
         let store_data = store_arc.clone();
         let transport_data = Arc::clone(&transport_arc);
         let peer_ids_verify = Arc::clone(&peer_ids_arc);
+        let beacon_arc_data = Arc::clone(&beacon_arc);
         task_handles.push(rt.spawn(async move {
             loop {
                 match data_rx.recv().await {
                     Ok(received) => {
-                        let mut src = [0u8; 16];
-                        src.copy_from_slice(received.destination.as_slice());
                         let data = received.data.as_slice().to_vec();
+                        // Source = LXMF sender address (wire bytes 16..32), not the transport destination.
+                        let src = if data.len() >= 32 {
+                            let mut s = [0u8; 16]; s.copy_from_slice(&data[16..32]); s
+                        } else { [0u8; 16] };
                         info!("LxmfNode: received {} bytes from {}", data.len(), hex::encode(&src));
-                        // Verify Ed25519 LXMF signature before processing.
+
+                        // Beacon RPC response: JSON or compressed, not LXMF-framed.
+                        if looks_like_rpc_response(&data) {
+                            if let Ok(mut mgr) = beacon_arc_data.lock() {
+                                if let Some(result) = mgr.on_rpc_bytes(&data) {
+                                    let is_error = result.result.is_err();
+                                    let result_json = match result.result {
+                                        Ok(v)  => v.to_string(),
+                                        Err(e) => serde_json::json!({"code": e.code, "message": e.message}).to_string(),
+                                    };
+                                    if let Ok(mut eq) = events_data.lock() {
+                                        if eq.len() < 1024 {
+                                            eq.push_back(LxmfEvent::RpcResponse {
+                                                id: result.id, method: result.method, result_json, is_error,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+
+                        // Fire request_path unconditionally so the sender re-announces
+                        // and their identity enters peer_identities. Critical for the
+                        // Sideband cold-start case: we may receive a message before their
+                        // announce has reached us, and without this we'd never trigger
+                        // a re-announce and every message would be silently dropped.
+                        if src != [0u8; 16] {
+                            let t = Arc::clone(&transport_data);
+                            let sender = src;
+                            tokio::spawn(async move {
+                                use rns_transport::hash::AddressHash;
+                                t.lock().await.request_path(&AddressHash::new(sender), None, None).await;
+                            });
+                        }
+
+                        // Verify Ed25519 LXMF signature.
                         let sig_result = {
                             let ids = peer_ids_verify.lock().unwrap_or_else(|p| p.into_inner());
                             verify_lxmf_signature(&data, &ids)
@@ -451,28 +503,16 @@ impl LxmfNode {
                             Some(true) => {}
                             Some(false) => {
                                 warn!("LxmfNode: invalid LXMF signature from {}, dropping",
-                                    hex::encode(&data.get(16..32).unwrap_or(&[])));
+                                    hex::encode(&src));
                                 continue;
                             }
                             None => {
-                                // Peer not yet announced — drop the message; the request_path
-                                // below will trigger a re-announce so the next message passes.
-                                warn!("LxmfNode: dropping message from unannounced peer {} (no identity cached)",
-                                    hex::encode(&data.get(16..32).unwrap_or(&[])));
+                                // Identity not cached yet — path request already fired above.
+                                // Drop this message; the re-announce will let the next one through.
+                                warn!("LxmfNode: dropping message from unannounced peer {} (path requested)",
+                                    hex::encode(&src));
                                 continue;
                             }
-                        }
-                        // Request a path to the sender so the transport resolves their
-                        // identity — enabling immediate replies without waiting for their
-                        // next periodic announce.
-                        if data.len() >= 32 {
-                            let mut sender = [0u8; 16];
-                            sender.copy_from_slice(&data[16..32]);
-                            let t = Arc::clone(&transport_data);
-                            tokio::spawn(async move {
-                                use rns_transport::hash::AddressHash;
-                                t.lock().await.request_path(&AddressHash::new(sender), None, None).await;
-                            });
                         }
                         let event = lxmf_event_from_bytes(src, data);
                         persist_inbound_message(&store_data, &event);
@@ -501,9 +541,10 @@ impl LxmfNode {
                 match resource_rx.recv().await {
                     Ok(event) => {
                         if let ResourceEventKind::Complete(complete) = event.kind {
-                            let mut src = [0u8; 16];
-                            src.copy_from_slice(event.link_id.as_slice());
                             let data = complete.data;
+                            let src = if data.len() >= 32 {
+                                let mut s = [0u8; 16]; s.copy_from_slice(&data[16..32]); s
+                            } else { [0u8; 16] };
                             info!("LxmfNode: resource complete {} bytes from {}", data.len(), hex::encode(&src));
                             let lxmf_event = lxmf_event_from_bytes(src, data);
                             persist_inbound_message(&store_res, &lxmf_event);
@@ -516,6 +557,55 @@ impl LxmfNode {
                         warn!("LxmfNode: lagged {} resource events", n);
                     }
                     Err(_) => break,
+                }
+            }
+        }));
+
+        // Beacon RPC dispatch — drains queued calls and sends via Reticulum links.
+        let beacon_arc_rpc = Arc::clone(&beacon_arc);
+        let peer_ids_rpc   = Arc::clone(&peer_ids_arc);
+        let transport_rpc  = Arc::clone(&transport_arc);
+        let events_rpc     = Arc::clone(&events);
+        task_handles.push(rt.spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                let calls = match beacon_arc_rpc.lock() {
+                    Ok(mut m) => m.drain_pending_rpcs(),
+                    Err(_) => continue,
+                };
+                if calls.is_empty() { continue; }
+                use rns_transport::delivery::send_via_link;
+                let transport = transport_rpc.lock().await;
+                for rpc in calls {
+                    let desc = peer_ids_rpc.lock().ok().and_then(|ids| ids.get(&rpc.dest).copied());
+                    let Some(desc) = desc else {
+                        warn!("LxmfNode: RPC id={} {}: no route to beacon {}", rpc.id, rpc.method, hex::encode(&rpc.dest));
+                        if let Ok(mut eq) = events_rpc.lock() {
+                            if eq.len() < 1024 {
+                                eq.push_back(LxmfEvent::RpcResponse {
+                                    id: rpc.id, method: rpc.method,
+                                    result_json: r#"{"code":-32001,"message":"No route to beacon"}"#.to_owned(),
+                                    is_error: true,
+                                });
+                            }
+                        }
+                        continue;
+                    };
+                    match send_via_link(&transport, desc, &rpc.payload, std::time::Duration::from_secs(30)).await {
+                        Ok(_) => info!("LxmfNode: RPC id={} {} sent", rpc.id, rpc.method),
+                        Err(e) => {
+                            warn!("LxmfNode: RPC id={} {} failed: {}", rpc.id, rpc.method, e);
+                            if let Ok(mut eq) = events_rpc.lock() {
+                                if eq.len() < 1024 {
+                                    eq.push_back(LxmfEvent::RpcResponse {
+                                        id: rpc.id, method: rpc.method,
+                                        result_json: format!(r#"{{"code":-32000,"message":"Send failed: {e}"}}"#),
+                                        is_error: true,
+                                    });
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }));
@@ -724,6 +814,11 @@ impl LxmfNode {
             let node = guard.as_ref().ok_or("Node not initialized")?;
             (Arc::clone(&node.pending_sends), Arc::clone(&node.peer_identities))
         };
+        let beacon_arc = {
+            let guard = Self::global().lock().map_err(|e| e.to_string())?;
+            let node = guard.as_ref().ok_or("Node not initialized")?;
+            Arc::clone(&node.beacon_mgr)
+        };
         let transport_for_ann = Arc::clone(&transport_arc);
 
         let store_arc: Option<Arc<MessageStore>> = {
@@ -750,6 +845,7 @@ impl LxmfNode {
         let store_ann = store_arc.clone();
         let pending_for_ann_task = Arc::clone(&pending_for_ann);
         let peer_ids_ann = Arc::clone(&peer_ids_arc);
+        let beacon_arc_ann = Arc::clone(&beacon_arc);
         let mut announce_rx = announce_rx;
         task_handles.push(rt.spawn(async move {
             let pending_for_ann = pending_for_ann_task;
@@ -768,6 +864,11 @@ impl LxmfNode {
                         // Cache peer identity for large-payload link sends
                         if let Ok(mut ids) = peer_ids_ann.lock() {
                             ids.insert(dh, desc);
+                        }
+
+                        // Track beacon announces for RPC dispatch
+                        if let Ok(mut mgr) = beacon_arc_ann.lock() {
+                            mgr.on_announce_received(dh, &app_data);
                         }
 
                         let to_retry: Vec<(u64, Option<i64>, Vec<u8>)> = {
@@ -835,14 +936,47 @@ impl LxmfNode {
         let store_data = store_arc.clone();
         let transport_data = Arc::clone(&transport_arc);
         let peer_ids_verify = Arc::clone(&peer_ids_arc);
+        let beacon_arc_data = Arc::clone(&beacon_arc);
         task_handles.push(rt.spawn(async move {
             loop {
                 match data_rx.recv().await {
                     Ok(received) => {
-                        let mut src = [0u8; 16];
-                        src.copy_from_slice(received.destination.as_slice());
                         let data = received.data.as_slice().to_vec();
+                        let src = if data.len() >= 32 {
+                            let mut s = [0u8; 16]; s.copy_from_slice(&data[16..32]); s
+                        } else { [0u8; 16] };
                         info!("LxmfNode full: received {} bytes from {}", data.len(), hex::encode(&src));
+
+                        // Beacon RPC response: JSON or compressed, not LXMF-framed.
+                        if looks_like_rpc_response(&data) {
+                            if let Ok(mut mgr) = beacon_arc_data.lock() {
+                                if let Some(result) = mgr.on_rpc_bytes(&data) {
+                                    let is_error = result.result.is_err();
+                                    let result_json = match result.result {
+                                        Ok(v)  => v.to_string(),
+                                        Err(e) => serde_json::json!({"code": e.code, "message": e.message}).to_string(),
+                                    };
+                                    if let Ok(mut eq) = events_data.lock() {
+                                        if eq.len() < 1024 {
+                                            eq.push_back(LxmfEvent::RpcResponse {
+                                                id: result.id, method: result.method, result_json, is_error,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+
+                        if src != [0u8; 16] {
+                            let t = Arc::clone(&transport_data);
+                            let sender = src;
+                            tokio::spawn(async move {
+                                use rns_transport::hash::AddressHash;
+                                t.lock().await.request_path(&AddressHash::new(sender), None, None).await;
+                            });
+                        }
+
                         let sig_result = {
                             let ids = peer_ids_verify.lock().unwrap_or_else(|p| p.into_inner());
                             verify_lxmf_signature(&data, &ids)
@@ -851,23 +985,14 @@ impl LxmfNode {
                             Some(true) => {}
                             Some(false) => {
                                 warn!("LxmfNode full: invalid LXMF signature from {}, dropping",
-                                    hex::encode(&data.get(16..32).unwrap_or(&[])));
+                                    hex::encode(&src));
                                 continue;
                             }
                             None => {
-                                warn!("LxmfNode full: dropping message from unannounced peer {} (no identity cached)",
-                                    hex::encode(&data.get(16..32).unwrap_or(&[])));
+                                warn!("LxmfNode full: dropping message from unannounced peer {} (path requested)",
+                                    hex::encode(&src));
                                 continue;
                             }
-                        }
-                        if data.len() >= 32 {
-                            let mut sender = [0u8; 16];
-                            sender.copy_from_slice(&data[16..32]);
-                            let t = Arc::clone(&transport_data);
-                            tokio::spawn(async move {
-                                use rns_transport::hash::AddressHash;
-                                t.lock().await.request_path(&AddressHash::new(sender), None, None).await;
-                            });
                         }
                         let event = lxmf_event_from_bytes(src, data);
                         persist_inbound_message(&store_data, &event);
@@ -896,9 +1021,10 @@ impl LxmfNode {
                 match resource_rx.recv().await {
                     Ok(event) => {
                         if let ResourceEventKind::Complete(complete) = event.kind {
-                            let mut src = [0u8; 16];
-                            src.copy_from_slice(event.link_id.as_slice());
                             let data = complete.data;
+                            let src = if data.len() >= 32 {
+                                let mut s = [0u8; 16]; s.copy_from_slice(&data[16..32]); s
+                            } else { [0u8; 16] };
                             info!("LxmfNode full: resource complete {} bytes from {}", data.len(), hex::encode(&src));
                             let lxmf_event = lxmf_event_from_bytes(src, data);
                             persist_inbound_message(&store_res, &lxmf_event);
@@ -911,6 +1037,55 @@ impl LxmfNode {
                         warn!("LxmfNode full: lagged {} resource events", n);
                     }
                     Err(_) => break,
+                }
+            }
+        }));
+
+        // Beacon RPC dispatch
+        let beacon_arc_rpc = Arc::clone(&beacon_arc);
+        let peer_ids_rpc   = Arc::clone(&peer_ids_arc);
+        let transport_rpc  = Arc::clone(&transport_arc);
+        let events_rpc     = Arc::clone(&events);
+        task_handles.push(rt.spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                let calls = match beacon_arc_rpc.lock() {
+                    Ok(mut m) => m.drain_pending_rpcs(),
+                    Err(_) => continue,
+                };
+                if calls.is_empty() { continue; }
+                use rns_transport::delivery::send_via_link;
+                let transport = transport_rpc.lock().await;
+                for rpc in calls {
+                    let desc = peer_ids_rpc.lock().ok().and_then(|ids| ids.get(&rpc.dest).copied());
+                    let Some(desc) = desc else {
+                        warn!("LxmfNode full: RPC id={} {}: no route to beacon {}", rpc.id, rpc.method, hex::encode(&rpc.dest));
+                        if let Ok(mut eq) = events_rpc.lock() {
+                            if eq.len() < 1024 {
+                                eq.push_back(LxmfEvent::RpcResponse {
+                                    id: rpc.id, method: rpc.method,
+                                    result_json: r#"{"code":-32001,"message":"No route to beacon"}"#.to_owned(),
+                                    is_error: true,
+                                });
+                            }
+                        }
+                        continue;
+                    };
+                    match send_via_link(&transport, desc, &rpc.payload, std::time::Duration::from_secs(30)).await {
+                        Ok(_) => info!("LxmfNode full: RPC id={} {} sent", rpc.id, rpc.method),
+                        Err(e) => {
+                            warn!("LxmfNode full: RPC id={} {} failed: {}", rpc.id, rpc.method, e);
+                            if let Ok(mut eq) = events_rpc.lock() {
+                                if eq.len() < 1024 {
+                                    eq.push_back(LxmfEvent::RpcResponse {
+                                        id: rpc.id, method: rpc.method,
+                                        result_json: format!(r#"{{"code":-32000,"message":"Send failed: {e}"}}"#),
+                                        is_error: true,
+                                    });
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }));
@@ -1272,7 +1447,7 @@ impl LxmfNode {
         // is moved into the rt.block_on async block.
         let display_name_reann = display_name.clone();
 
-        let (transport_arc, my_dest, mut data_rx, announce_rx, addr_hex) =
+        let (transport_arc, my_dest, mut data_rx, mut resource_rx, announce_rx, addr_hex) =
             rt.block_on(async move {
                 let config = TransportConfig::new("lxmf-ble", &private_identity, true);
                 let mut transport = Transport::new(config);
@@ -1304,9 +1479,10 @@ impl LxmfNode {
                 transport.send_announce(&my_dest, Some(ble_name.as_slice())).await;
 
                 let data_rx = transport.received_data_events();
+                let resource_rx = transport.resource_events();
                 let announce_rx = transport.recv_announces().await;
                 let arc = Arc::new(tokio::sync::Mutex::new(transport));
-                (arc, my_dest, data_rx, announce_rx, addr_hex)
+                (arc, my_dest, data_rx, resource_rx, announce_rx, addr_hex)
             });
 
         info!("LxmfNode BLE: LXMF delivery address = {}", addr_hex);
@@ -1445,19 +1621,20 @@ impl LxmfNode {
             loop {
                 match data_rx.recv().await {
                     Ok(received) => {
-                        let mut src = [0u8; 16];
-                        src.copy_from_slice(received.destination.as_slice());
                         let data = received.data.as_slice().to_vec();
-                        info!("LxmfNode BLE: received {} bytes", data.len());
+                        let src = if data.len() >= 32 {
+                            let mut s = [0u8; 16]; s.copy_from_slice(&data[16..32]); s
+                        } else { [0u8; 16] };
+                        info!("LxmfNode BLE: received {} bytes from {}", data.len(), hex::encode(&src));
 
-                        // Emit a synthetic announce for the sender so the UI peer list
-                        // updates immediately instead of waiting up to 60s for their next
-                        // periodic announce. Sender LXMF address = LXMF payload bytes 16-31.
-                        // Also verify the LXMF signature and request a path so the transport
-                        // resolves the sender's identity for immediate replies.
+                        // Beacon RPC responses are JSON or zlib-compressed, not LXMF-framed.
+                        if looks_like_rpc_response(&data) {
+                            // BLE-only mode has no RPC dispatch task — silently discard.
+                            continue;
+                        }
+
                         if data.len() >= 32 {
-                            let mut sender_hash = [0u8; 16];
-                            sender_hash.copy_from_slice(&data[16..32]);
+                            let sender_hash = src;
 
                             // Fire request_path unconditionally — even if we drop this
                             // message (unknown peer), the path request prompts the peer
@@ -1487,16 +1664,6 @@ impl LxmfNode {
                                     continue;
                                 }
                             }
-
-                            if let Ok(mut eq) = events_data.lock() {
-                                if eq.len() < 1024 {
-                                    eq.push_back(LxmfEvent::AnnounceReceived {
-                                        dest_hash: sender_hash,
-                                        app_data: vec![],
-                                        hops: 0,
-                                    });
-                                }
-                            }
                         }
 
                         let event = lxmf_event_from_bytes(src, data);
@@ -1511,6 +1678,35 @@ impl LxmfNode {
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         warn!("LxmfNode BLE: lagged {} data events", n);
+                    }
+                    Err(_) => break,
+                }
+            }
+        }));
+
+        // Resource receiver — large messages delivered via Reticulum resource transfer.
+        let events_res = Arc::clone(&events);
+        let store_res = store_arc.clone();
+        task_handles.push(rt.spawn(async move {
+            use rns_transport::resource::ResourceEventKind;
+            loop {
+                match resource_rx.recv().await {
+                    Ok(event) => {
+                        if let ResourceEventKind::Complete(complete) = event.kind {
+                            let data = complete.data;
+                            let src = if data.len() >= 32 {
+                                let mut s = [0u8; 16]; s.copy_from_slice(&data[16..32]); s
+                            } else { [0u8; 16] };
+                            info!("LxmfNode BLE: resource complete {} bytes from {}", data.len(), hex::encode(&src));
+                            let lxmf_event = lxmf_event_from_bytes(src, data);
+                            persist_inbound_message(&store_res, &lxmf_event);
+                            if let Ok(mut eq) = events_res.lock() {
+                                eq.push_back(lxmf_event);
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("LxmfNode BLE: lagged {} resource events", n);
                     }
                     Err(_) => break,
                 }
@@ -1610,7 +1806,7 @@ impl LxmfNode {
 
         // TODO: graceful transport shutdown
         node.running = false;
-        node.beacon_mgr.stop();
+        if let Ok(mut m) = node.beacon_mgr.lock() { m.stop(); }
         info!("LxmfNode: stopped");
         Ok(())
     }
@@ -1634,11 +1830,11 @@ impl LxmfNode {
             "mode": node.mode,
             "identityHex": &node.identity_hex[..std::cmp::min(32, node.identity_hex.len())],
             "addressHex": &node.address_hex,
-            "lifecycle": if node.running { 3 } else { 0 },
+            "lifecycle": if node.running { node.mode } else { 0 },
             "epoch": 0,
             "pendingOutbound": 0,
             "outboundSent": node.outbound_sent,
-            "inboundAccepted": node.inbound_accepted,
+            "inboundAccepted": node.messages_received,
             "announcesReceived": node.announces_received,
             "lxmfMessagesReceived": node.messages_received,
             "blePeerCount": crate::ble_iface::ble_peer_count() as u32,
@@ -1672,7 +1868,7 @@ impl LxmfNode {
             });
         }
 
-        events.extend(node.beacon_mgr.drain_events());
+        if let Ok(mut m) = node.beacon_mgr.lock() { events.extend(m.drain_events()); }
 
         // Update counters based on drained events
         for ev in &events {
@@ -1705,6 +1901,12 @@ impl LxmfNode {
     pub fn abi_version() -> u32 {
         2 // v2 = rns-transport based
     }
+}
+
+/// True when data cannot be an LXMF packet and should be tried as an RPC response.
+/// LXMF minimum is 97 bytes with a binary header; JSON starts with `{`, compressed with `\x00`.
+fn looks_like_rpc_response(data: &[u8]) -> bool {
+    data.len() < 97 || data.starts_with(b"{") || data.starts_with(b"\x00zl")
 }
 
 /// Decode an inbound LXMF wire payload and return a MessageReceived event.
@@ -1907,7 +2109,14 @@ pub(crate) fn mp_read_lxmf_fields(data: &[u8], pos: &mut usize) -> (Option<(Stri
 pub(crate) fn build_app_data(display_name: &str, is_beacon: bool) -> Vec<u8> {
     const PREFIX: &[u8] = b"anonmesh::beacon::v1\0";
     let name = if display_name.is_empty() { "lxmf-mobile" } else { display_name };
-    let name_bytes = &name.as_bytes()[..name.len().min(32)];
+    // Truncate at a UTF-8 character boundary ≤ 32 bytes to avoid splitting multi-byte codepoints.
+    let truncated_len = name.char_indices()
+        .take_while(|(i, _)| *i < 32)
+        .last()
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0)
+        .min(name.len());
+    let name_bytes = &name.as_bytes()[..truncated_len];
     if is_beacon {
         let mut data = Vec::with_capacity(PREFIX.len() + name_bytes.len());
         data.extend_from_slice(PREFIX);

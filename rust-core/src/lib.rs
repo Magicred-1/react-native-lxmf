@@ -8,6 +8,7 @@
 
 pub mod node;
 pub mod beacon;
+pub mod solana_tx;
 pub mod ble_iface;
 pub mod nus_iface;
 pub mod ffi;

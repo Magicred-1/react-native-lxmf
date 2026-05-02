@@ -235,6 +235,31 @@ class BLEManager: NSObject {
         return !nusPeripherals.isEmpty
     }
 
+    /// JSON array of discovered-but-not-yet-bonded RNodes.
+    /// Uses CoreBluetooth UUID as "mac" (iOS hides real MACs since iOS 13).
+    func unpairedRNodesJson() -> String {
+        var entries: [[String: String]] = []
+        for (uuid, peripheral) in discoveredUnpairedRNodes {
+            entries.append(["mac": uuid.uuidString, "name": peripheral.name ?? ""])
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: entries),
+              let str = String(data: data, encoding: .utf8) else { return "[]" }
+        return str
+    }
+
+    /// Initiate connection to a discovered-but-unpaired RNode by its CoreBluetooth UUID string.
+    /// CoreBluetooth handles pairing transparently when the peripheral requires encryption.
+    /// Returns false if the UUID is unknown (device not seen in scan yet).
+    func connectRNode(_ identifierString: String) -> Bool {
+        guard let uuid = UUID(uuidString: identifierString),
+              let peripheral = discoveredUnpairedRNodes[uuid] else { return false }
+        guard connectedPeripherals[uuid] == nil else { return true }
+        connectedPeripherals[uuid] = peripheral
+        peripheral.delegate = self
+        centralManager?.connect(peripheral, options: nil)
+        return true
+    }
+
     /// Derive a 6-byte pseudo-MAC from a CoreBluetooth UUID.
     /// XOR-folds the 16-byte UUID into 6 bytes for stable peer identification.
     static func uuidToAddr(_ uuid: UUID) -> Data {

@@ -2,12 +2,17 @@ package expo.modules.lxmf
 
 import android.bluetooth.*
 import android.bluetooth.le.*
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
 import android.util.Log
+import org.json.JSONArray
+import org.json.JSONObject
 import java.util.UUID
 
 private const val NUS_TAG = "LxmfNus"
@@ -43,8 +48,8 @@ class NusManager(
     private val txChars = mutableMapOf<String, BluetoothGattCharacteristic>()
     // Negotiated write MTU per connection — used for TX chunking
     private val writeMtu = mutableMapOf<String, Int>()
-    // MACs found in scan but not OS-paired — UI should prompt user to pair in Settings
-    private val discoveredUnpaired = mutableSetOf<String>()
+    // Devices found in scan but not OS-paired — keyed by MAC for O(1) lookup
+    private val discoveredUnpaired = mutableMapOf<String, BluetoothDevice>()
     // MACs currently attempting connection
     private val connecting = mutableSetOf<String>()
 
@@ -58,17 +63,49 @@ class NusManager(
         private const val DEFAULT_WRITE_MTU = 20  // conservative BLE default
     }
 
+    // ── Bond state receiver ───────────────────────────────────────────────────
+
+    private val bondReceiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context, intent: Intent) {
+            if (intent.action != BluetoothDevice.ACTION_BOND_STATE_CHANGED) return
+            val device: BluetoothDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+            }
+            val mac = device?.address ?: return
+            val bondState = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.BOND_NONE)
+            if (bondState == BluetoothDevice.BOND_BONDED) {
+                Log.i(NUS_TAG, "NUS: $mac bonded — connecting")
+                discoveredUnpaired.remove(mac)
+                if (isRunning && mac !in connections && mac !in connecting) {
+                    connecting.add(mac)
+                    device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+                }
+            }
+        }
+    }
+
     // ── Lifecycle ────────────────────────────────────────────────────────────
 
     fun start() {
         if (isRunning) return
         isRunning = true
+        val filter = IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(bondReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            context.registerReceiver(bondReceiver, filter)
+        }
         startScanning()
         Log.i(NUS_TAG, "NusManager started")
     }
 
     fun stop() {
         isRunning = false
+        try { context.unregisterReceiver(bondReceiver) } catch (_: Exception) {}
         stopScanning()
         connections.values.forEach { it.disconnect(); it.close() }
         connections.clear()
@@ -79,8 +116,40 @@ class NusManager(
         Log.i(NUS_TAG, "NusManager stopped")
     }
 
-    /** Number of RNodes visible in scan but not yet OS-paired (mirrors iOS discoveredUnpairedRNodes.count). */
+    /** Number of RNodes visible in scan but not yet OS-paired. */
     fun unpairedRNodeCount(): Int = discoveredUnpaired.size
+
+    /** JSON array of unpaired RNodes: [{"mac":"AA:BB:...","name":"RNode_1234"},...] */
+    fun unpairedRNodesJson(): String {
+        val arr = JSONArray()
+        discoveredUnpaired.values.forEach { device ->
+            arr.put(JSONObject().apply {
+                put("mac", device.address)
+                put("name", device.name ?: "")
+            })
+        }
+        return arr.toString()
+    }
+
+    /**
+     * Initiate OS pairing with an unpaired RNode. Shows system Bluetooth pairing dialog.
+     * Returns true if bond initiation succeeded (or device is already bonded and connecting).
+     * Requires BLUETOOTH_CONNECT permission (API 31+).
+     */
+    fun pairRNode(mac: String): Boolean {
+        val device = discoveredUnpaired[mac]
+            ?: try { adapter?.getRemoteDevice(mac) } catch (_: Exception) { null }
+            ?: return false
+        return if (device.bondState == BluetoothDevice.BOND_BONDED) {
+            if (mac !in connections && mac !in connecting) {
+                connecting.add(mac)
+                device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+            }
+            true
+        } else {
+            device.createBond()
+        }
+    }
 
     /** Number of fully connected and ready RNodes. */
     fun connectedRNodeCount(): Int = connections.size
@@ -106,15 +175,27 @@ class NusManager(
         data: ByteArray,
         mtu: Int,
     ) {
+        // Android GATT is single-op — only one writeCharacteristic in flight at a time.
+        // For NUS, packets are bounded by NusInterface.mtu (244 B) so KISS frames fit in
+        // one ATT PDU after MTU negotiation (514 B). The loop is a safety net only.
         var offset = 0
         while (offset < data.size) {
             val end = minOf(offset + mtu, data.size)
             val chunk = data.copyOfRange(offset, end)
-            @Suppress("DEPRECATION")
-            char.value = chunk
-            char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-            @Suppress("DEPRECATION")
-            gatt.writeCharacteristic(char)
+            val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gatt.writeCharacteristic(char, chunk, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE) ==
+                    BluetoothGatt.GATT_SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                char.value = chunk
+                char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                @Suppress("DEPRECATION")
+                gatt.writeCharacteristic(char)
+            }
+            if (!ok) {
+                Log.w(NUS_TAG, "NUS TX write rejected at offset $offset — ${data.size - offset}B dropped")
+                return
+            }
             offset = end
         }
     }
@@ -157,9 +238,9 @@ class NusManager(
                     device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
                 }
                 else -> {
-                    // Not paired — track for UI, don't auto-connect
-                    if (discoveredUnpaired.add(mac)) {
-                        Log.i(NUS_TAG, "NUS: found unpaired RNode $mac — pair in Bluetooth Settings first")
+                    // Not paired — track for UI; call pairRNode(mac) to initiate pairing
+                    if (discoveredUnpaired.put(mac, device) == null) {
+                        Log.i(NUS_TAG, "NUS: found unpaired RNode $mac (${device.name ?: "?"}) — call pairRNode()")
                     }
                 }
             }
@@ -250,6 +331,18 @@ class NusManager(
             }
 
             Log.i(NUS_TAG, "NUS RNode ready: $mac (tx=${txChar != null}, rx=${rxChar != null})")
+        }
+
+        override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+            val mac = gatt.device.address
+            if (descriptor.uuid == CCCD_UUID) {
+                if (status == BluetoothGatt.GATT_SUCCESS) {
+                    Log.i(NUS_TAG, "NUS RX notifications enabled: $mac — RNode ready")
+                } else {
+                    Log.e(NUS_TAG, "NUS CCCD write failed ($status) on $mac — RX notifications NOT enabled, disconnecting")
+                    gatt.disconnect()
+                }
+            }
         }
 
         // API < 33 compat override

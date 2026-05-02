@@ -134,6 +134,15 @@ func lxmf_nus_poll_tx(
     _ outCapacity: Int
 ) -> Int32
 
+// --- Beacon RPC FFI ---
+
+@_silgen_name("lxmf_beacon_rpc")
+func lxmf_beacon_rpc(
+    _ destHashHex: UnsafePointer<CChar>?,
+    _ method: UnsafePointer<CChar>?,
+    _ paramsJson: UnsafePointer<CChar>?
+) -> Int64
+
 
 public class LxmfModule: Module {
     // Shared JSON buffer for FFI calls (64KB)
@@ -161,6 +170,10 @@ public class LxmfModule: Module {
             "onMessageReceived",
             "onAnnounceReceived",
             "onStatusChanged",
+            "onRpcResponse",
+            "onMessageQueued",
+            "onMessageDelivered",
+            "onMessageFailed",
             "onLog",
             "onError",
             "onOutgoingPacket"
@@ -340,6 +353,34 @@ public class LxmfModule: Module {
         Function("bleUnpairedRNodeCount") { () -> Int in
             return self.bleManager.discoveredUnpairedRNodes.count
         }
+
+        // --- Beacon RPC ---
+
+        AsyncFunction("beaconRpc") { (destHashHex: String, method: String, paramsJson: String?) -> Double in
+            let id = destHashHex.withCString { destPtr in
+                method.withCString { methodPtr in
+                    if let p = paramsJson {
+                        return p.withCString { paramsPtr in
+                            lxmf_beacon_rpc(destPtr, methodPtr, paramsPtr)
+                        }
+                    }
+                    return lxmf_beacon_rpc(destPtr, methodPtr, nil)
+                }
+            }
+            return Double(id)
+        }
+
+        // --- RNode pairing (NUS) ---
+
+        Function("getNusUnpairedRNodes") { () -> String in
+            return self.bleManager.unpairedRNodesJson()
+        }
+
+        // On iOS, "pairing" = connect (CoreBluetooth handles encryption/bonding transparently).
+        // The identifier is a CoreBluetooth UUID string, not a MAC (iOS hides MACs since iOS 13).
+        Function("pairNusRNode") { (identifier: String) -> Bool in
+            return self.bleManager.connectRNode(identifier)
+        }
     }
 
     // MARK: - Polling
@@ -397,6 +438,14 @@ public class LxmfModule: Module {
                 sendEvent("onMessageReceived", event)
             case "announceReceived":
                 sendEvent("onAnnounceReceived", event)
+            case "rpcResponse":
+                sendEvent("onRpcResponse", event)
+            case "messageQueued":
+                sendEvent("onMessageQueued", event)
+            case "messageDelivered":
+                sendEvent("onMessageDelivered", event)
+            case "messageFailed":
+                sendEvent("onMessageFailed", event)
             case "log":
                 sendEvent("onLog", event)
             case "error":

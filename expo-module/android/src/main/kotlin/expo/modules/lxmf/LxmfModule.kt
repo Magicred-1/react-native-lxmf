@@ -33,6 +33,10 @@ class LxmfModule : Module() {
       "onMessageReceived",
       "onAnnounceReceived",
       "onStatusChanged",
+      "onRpcResponse",
+      "onMessageQueued",
+      "onMessageDelivered",
+      "onMessageFailed",
       "onLog",
       "onError",
       "onOutgoingPacket"
@@ -127,6 +131,11 @@ class LxmfModule : Module() {
       nativeFetchMessages(limit)
     }
 
+    // Beacon RPC
+    AsyncFunction("beaconRpc") { destHashHex: String, method: String, paramsJson: String? ->
+      nativeBeaconRpc(destHashHex, method, paramsJson).toDouble()
+    }
+
     // Configuration
     Function("setLogLevel") { level: Int ->
       nativeSetLogLevel(level) == 0
@@ -158,6 +167,14 @@ class LxmfModule : Module() {
     Function("bleUnpairedRNodeCount") {
       nusManager?.unpairedRNodeCount() ?: 0
     }
+
+    Function("getNusUnpairedRNodes") {
+      nusManager?.unpairedRNodesJson() ?: "[]"
+    }
+
+    Function("pairNusRNode") { mac: String ->
+      nusManager?.pairRNode(mac) ?: false
+    }
   }
 
   private fun drainAndEmitEvents() {
@@ -183,6 +200,10 @@ class LxmfModule : Module() {
           "packetReceived"   -> "onPacketReceived"
           "txReceived"       -> "onTxReceived"
           "beaconDiscovered" -> "onBeaconDiscovered"
+          "rpcResponse"      -> "onRpcResponse"
+          "messageQueued"    -> "onMessageQueued"
+          "messageDelivered" -> "onMessageDelivered"
+          "messageFailed"    -> "onMessageFailed"
           "log"              -> "onLog"
           "error"            -> "onError"
           else               -> null
@@ -222,6 +243,7 @@ class LxmfModule : Module() {
   private external fun nativeGetStatus(): String?
   private external fun nativeGetBeacons(): String?
   private external fun nativeFetchMessages(limit: Int): String?
+  private external fun nativeBeaconRpc(destHashHex: String, method: String, paramsJson: String?): Long
   private external fun nativeSetLogLevel(level: Int): Int
   private external fun nativeAbiVersion(): Int
 

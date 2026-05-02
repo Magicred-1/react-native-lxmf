@@ -33,8 +33,15 @@ export interface LxmfMessageEvent {
   files?: { name: string; data: string }[];    // data = base64
 }
 
+export interface RpcResponseEvent {
+  id: number;
+  method: string;
+  resultJson: string;
+  isError: boolean;
+}
+
 export interface LxmfEvent {
-  type: 'statusChanged' | 'packetReceived' | 'txReceived' | 'beaconDiscovered' | 'messageReceived' | 'announceReceived' | 'messageQueued' | 'messageDelivered' | 'messageFailed' | 'log' | 'error';
+  type: 'statusChanged' | 'packetReceived' | 'txReceived' | 'beaconDiscovered' | 'messageReceived' | 'announceReceived' | 'messageQueued' | 'messageDelivered' | 'messageFailed' | 'log' | 'error' | 'rpcResponse';
   [key: string]: any;
 }
 
@@ -186,6 +193,19 @@ export function useLxmf(options: UseLxmfOptions = {}) {
       mod.addListener('onError', (event: Record<string, any>) => {
         pushEvent('error', event);
         setError(`${String(event.code)}: ${String(event.message)}`);
+      }),
+      mod.addListener('onRpcResponse', (event: Record<string, any>) => {
+        pushEvent('rpcResponse', event);
+      }),
+      mod.addListener('onMessageQueued', (event: Record<string, any>) => {
+        pushEvent('messageQueued', event);
+      }),
+      mod.addListener('onMessageDelivered', (event: Record<string, any>) => {
+        pushEvent('messageDelivered', event);
+      }),
+      mod.addListener('onMessageFailed', (event: Record<string, any>) => {
+        pushEvent('messageFailed', event);
+        setError(`Message ${String(event.seq)} failed: ${String(event.reason ?? 'unknown')}`);
       }),
     ];
 
@@ -361,6 +381,42 @@ export function useLxmf(options: UseLxmfOptions = {}) {
     return LxmfModule.bleUnpairedRNodeCount();
   }, []);
 
+  /** List of RNodes visible in scan but not yet OS-paired. */
+  const getNusUnpairedRNodes = useCallback((): { mac: string; name: string }[] => {
+    try {
+      return parseJson<{ mac: string; name: string }[]>(LxmfModule.getNusUnpairedRNodes(), []);
+    } catch {
+      return [];
+    }
+  }, []);
+
+  /**
+   * Initiate OS Bluetooth pairing with an unpaired RNode (mac = "AA:BB:CC:DD:EE:FF").
+   * Shows system pairing dialog. Auto-connects on bond completion via bondReceiver.
+   */
+  const pairNusRNode = useCallback((mac: string): boolean => {
+    return LxmfModule.pairNusRNode(mac);
+  }, []);
+
+  /**
+   * Queue a JSON-RPC 2.0 call to a beacon.
+   * Returns correlation id; the response arrives as an `rpcResponse` event.
+   * `params` is any JSON-serializable value (usually an array).
+   */
+  const beaconRpc = useCallback(async (
+    destHashHex: string,
+    method: string,
+    params?: unknown,
+  ): Promise<number> => {
+    try {
+      const paramsJson = params === undefined ? null : JSON.stringify(params);
+      return await LxmfModule.beaconRpc(destHashHex, method, paramsJson);
+    } catch (e: any) {
+      setError(e?.message ?? 'beaconRpc failed');
+      return -1;
+    }
+  }, []);
+
   return {
     // State
     status,
@@ -383,5 +439,8 @@ export function useLxmf(options: UseLxmfOptions = {}) {
     startBLE,
     stopBLE,
     bleUnpairedRNodeCount,
+    getNusUnpairedRNodes,
+    pairNusRNode,
+    beaconRpc,
   };
 }
