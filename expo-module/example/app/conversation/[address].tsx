@@ -119,18 +119,23 @@ export default function ConversationScreen() {
   // Refresh when new message arrives for this thread
   useEffect(() => {
     const latest = events[0];
-    if (!latest) return;
-    if (latest.type === 'messageReceived' && latest.source === address) {
+    if (!latest || latest.type !== 'messageReceived') return;
+    const forThisThread = isGroupThread
+      ? latest.groupDest === address
+      : latest.source === address && !latest.groupDest;
+    if (forThisThread) {
       loadHistory();
       markRead(address ?? '');
     }
-  }, [events, address, loadHistory, markRead]);
+  }, [events, address, isGroupThread, loadHistory, markRead]);
 
   // Build merged, sorted, deduped bubble list
   const bubbles = useMemo((): BubbleMsg[] => {
     const sqlKeys = new Set(sqlMsgs.map(m => String(m.id)));
     const liveExtra: BubbleMsg[] = events
-      .filter(e => e.type === 'messageReceived' && e.source === address)
+      .filter(e => e.type === 'messageReceived' && (
+        isGroupThread ? e.groupDest === address : e.source === address && !e.groupDest
+      ))
       .filter(e => !sqlKeys.has(String(e.id)))
       .map(e => ({
         key: `live-${e.source}-${e.timestamp ?? Date.now()}`,

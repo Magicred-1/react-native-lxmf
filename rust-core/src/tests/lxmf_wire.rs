@@ -89,7 +89,7 @@ fn minimum_valid_payload_length_is_97_bytes() {
 fn received_event_source_matches_transport_source_addr() {
     let transport_src: [u8; 16] = [0xab; 16];
     let payload = build_wire_payload(&dest(), &source(), b"hi");
-    let event = lxmf_event_from_bytes(transport_src, payload);
+    let event = lxmf_event_from_bytes(transport_src, payload, None);
     match event {
         LxmfEvent::MessageReceived { source, .. } => {
             assert_eq!(source, transport_src,
@@ -107,8 +107,8 @@ fn two_senders_produce_distinct_reply_addresses() {
     let src_b: [u8; 16] = [0x02; 16];
     let payload = build_wire_payload(&dest(), &[0u8; 16], b"hi");
 
-    let ev_a = lxmf_event_from_bytes(src_a, payload.clone());
-    let ev_b = lxmf_event_from_bytes(src_b, payload);
+    let ev_a = lxmf_event_from_bytes(src_a, payload.clone(), None);
+    let ev_b = lxmf_event_from_bytes(src_b, payload, None);
 
     let addr_a = match ev_a { LxmfEvent::MessageReceived { source, .. } => source, _ => panic!() };
     let addr_b = match ev_b { LxmfEvent::MessageReceived { source, .. } => source, _ => panic!() };
@@ -124,7 +124,7 @@ fn transport_source_wins_over_lxmf_wire_source() {
     let lxmf_wire_src: [u8; 16] = [0x00; 16]; // different from transport_src
     let payload = build_wire_payload(&dest(), &lxmf_wire_src, b"msg");
 
-    let event = lxmf_event_from_bytes(transport_src, payload);
+    let event = lxmf_event_from_bytes(transport_src, payload, None);
     match event {
         LxmfEvent::MessageReceived { source, .. } => {
             assert_eq!(source, transport_src);

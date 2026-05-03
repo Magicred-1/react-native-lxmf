@@ -587,7 +587,7 @@ fn events_to_json(events: &[crate::node::LxmfEvent]) -> String {
             "type": "beaconDiscovered", "destHash": hex::encode(dest_hash),
             "appData": String::from_utf8_lossy(app_data).to_string(),
         }),
-        LxmfEvent::MessageReceived { source, title, body, image, files, timestamp } => {
+        LxmfEvent::MessageReceived { source, title, body, image, files, timestamp, group_dest } => {
             use base64::Engine as _;
             let b64 = base64::engine::general_purpose::STANDARD;
             let mut obj = serde_json::json!({
@@ -597,6 +597,9 @@ fn events_to_json(events: &[crate::node::LxmfEvent]) -> String {
                 "body": b64.encode(body),
                 "timestamp": timestamp,
             });
+            if let Some(gd) = group_dest {
+                obj["groupDest"] = serde_json::Value::String(hex::encode(gd));
+            }
             if let Some((mime, data)) = image {
                 obj["image"] = serde_json::json!({
                     "mimeType": mime,

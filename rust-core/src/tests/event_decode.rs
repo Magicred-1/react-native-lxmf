@@ -13,7 +13,7 @@ fn wire_bytes(title: &[u8], body: &[u8], fields_mp: &[u8]) -> Vec<u8> {
 #[test]
 fn too_short_falls_back_to_raw_body() {
     let data = vec![0u8; 10];
-    let ev = lxmf_event_from_bytes(addr(1), data.clone());
+    let ev = lxmf_event_from_bytes(addr(1), data.clone(), None);
     match ev {
         LxmfEvent::MessageReceived { body, title, image, files, .. } => {
             assert_eq!(body, data);
@@ -28,7 +28,7 @@ fn too_short_falls_back_to_raw_body() {
 #[test]
 fn garbage_bytes_fall_back_to_raw_body() {
     let data = vec![0xdeu8, 0xad, 0xbe, 0xef, 0x00, 0x11];
-    let ev = lxmf_event_from_bytes(addr(2), data.clone());
+    let ev = lxmf_event_from_bytes(addr(2), data.clone(), None);
     match ev {
         LxmfEvent::MessageReceived { body, .. } => assert_eq!(body, data),
         _ => panic!("expected MessageReceived"),
@@ -37,7 +37,7 @@ fn garbage_bytes_fall_back_to_raw_body() {
 
 #[test]
 fn empty_vec_falls_back_to_empty_raw_body() {
-    let ev = lxmf_event_from_bytes(addr(3), vec![]);
+    let ev = lxmf_event_from_bytes(addr(3), vec![], None);
     match ev {
         LxmfEvent::MessageReceived { body, title, image, files, .. } => {
             assert!(body.is_empty());
@@ -54,7 +54,7 @@ fn empty_vec_falls_back_to_empty_raw_body() {
 #[test]
 fn valid_payload_extracts_body() {
     let data = wire_bytes(b"", b"hello world", &[0x80]);
-    let ev = lxmf_event_from_bytes(addr(4), data);
+    let ev = lxmf_event_from_bytes(addr(4), data, None);
     match ev {
         LxmfEvent::MessageReceived { body, .. } => assert_eq!(body, b"hello world"),
         _ => panic!("expected MessageReceived"),
@@ -64,7 +64,7 @@ fn valid_payload_extracts_body() {
 #[test]
 fn valid_payload_extracts_title() {
     let data = wire_bytes(b"My Subject", b"body text", &[0x80]);
-    let ev = lxmf_event_from_bytes(addr(5), data);
+    let ev = lxmf_event_from_bytes(addr(5), data, None);
     match ev {
         LxmfEvent::MessageReceived { title, body, .. } => {
             assert_eq!(title, b"My Subject");
@@ -78,7 +78,7 @@ fn valid_payload_extracts_title() {
 fn valid_payload_source_address_preserved() {
     let src = addr(0xab);
     let data = wire_bytes(b"", b"msg", &[0x80]);
-    let ev = lxmf_event_from_bytes(src, data);
+    let ev = lxmf_event_from_bytes(src, data, None);
     match ev {
         LxmfEvent::MessageReceived { source, .. } => assert_eq!(source, src),
         _ => panic!("expected MessageReceived"),
@@ -88,7 +88,7 @@ fn valid_payload_source_address_preserved() {
 #[test]
 fn valid_payload_no_media_yields_none_image_and_empty_files() {
     let data = wire_bytes(b"", b"text only", &build_fields_msgpack(None));
-    let ev = lxmf_event_from_bytes(addr(6), data);
+    let ev = lxmf_event_from_bytes(addr(6), data, None);
     match ev {
         LxmfEvent::MessageReceived { image, files, .. } => {
             assert!(image.is_none());
@@ -107,7 +107,7 @@ fn valid_payload_with_image_decoded() {
         base64::engine::general_purpose::STANDARD.encode(img)
     );
     let data = wire_bytes(b"", b"caption", &build_fields_msgpack(Some(&json)));
-    let ev = lxmf_event_from_bytes(addr(7), data);
+    let ev = lxmf_event_from_bytes(addr(7), data, None);
     match ev {
         LxmfEvent::MessageReceived { image, body, .. } => {
             let (mime, bytes) = image.expect("image present");
@@ -129,7 +129,7 @@ fn valid_payload_with_files_decoded() {
         b64.encode(b"png bytes"),
     );
     let data = wire_bytes(b"", b"", &build_fields_msgpack(Some(&json)));
-    let ev = lxmf_event_from_bytes(addr(8), data);
+    let ev = lxmf_event_from_bytes(addr(8), data, None);
     match ev {
         LxmfEvent::MessageReceived { files, .. } => {
             assert_eq!(files.len(), 2);
@@ -146,7 +146,7 @@ fn valid_payload_with_files_decoded() {
 #[test]
 fn timestamp_is_reasonable() {
     let data = wire_bytes(b"", b"body", &[0x80]);
-    let ev = lxmf_event_from_bytes(addr(9), data);
+    let ev = lxmf_event_from_bytes(addr(9), data, None);
     match ev {
         LxmfEvent::MessageReceived { timestamp, .. } => {
             assert!(timestamp > 1_600_000_000, "timestamp should be post-2020: {timestamp}");

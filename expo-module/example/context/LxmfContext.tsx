@@ -282,7 +282,7 @@ export function LxmfProvider({ children }: { readonly children: React.ReactNode 
         }
       } else if (event.type === 'messageReceived') {
         const addr = String(event.source ?? '');
-        if (addr.length === 32 && !groupMapRef.current[addr]) {
+        if (!event.groupDest && addr.length === 32 && !groupMapRef.current[addr]) {
           upsertContact(addr, { lastMessage: event.body ? b64preview(String(event.body)) : '' });
         }
       }

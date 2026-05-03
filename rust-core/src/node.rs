@@ -43,6 +43,9 @@ pub enum LxmfEvent {
         image: Option<(String, Vec<u8>)>,
         files: Vec<(String, Vec<u8>)>,
         timestamp: u64,
+        /// Set for group channel messages: the group destination address.
+        /// JS routes the message to the group thread instead of a DM thread.
+        group_dest: Option<LxmfAddress>,
     },
     AnnounceReceived { dest_hash: DestHash, app_data: Vec<u8>, hops: u8 },
     MessageQueued { seq: u64, dest_hex: String },
@@ -515,7 +518,7 @@ impl LxmfNode {
                                     hex::encode(&src));
                             }
                         }
-                        let event = lxmf_event_from_bytes(src, data);
+                        let event = lxmf_event_from_bytes(src, data, None);
                         persist_inbound_message(&store_data, &event);
                         if let Ok(mut eq) = events_data.lock() {
                             if eq.len() < 1024 {
@@ -547,7 +550,7 @@ impl LxmfNode {
                                 let mut s = [0u8; 16]; s.copy_from_slice(&data[16..32]); s
                             } else { [0u8; 16] };
                             info!("LxmfNode: resource complete {} bytes from {}", data.len(), hex::encode(&src));
-                            let lxmf_event = lxmf_event_from_bytes(src, data);
+                            let lxmf_event = lxmf_event_from_bytes(src, data, None);
                             persist_inbound_message(&store_res, &lxmf_event);
                             if let Ok(mut eq) = events_res.lock() {
                                 eq.push_back(lxmf_event);
@@ -721,7 +724,7 @@ impl LxmfNode {
                             Ok(dec) if dec.len() >= 97 => {
                                 let mut src = [0u8; 16];
                                 src.copy_from_slice(&dec[16..32]);
-                                let event = lxmf_event_from_bytes(src, dec.clone());
+                                let event = lxmf_event_from_bytes(src, dec.clone(), Some(dest));
                                 persist_inbound_message(&store_group, &event);
                                 if let Ok(mut eq) = events_group.lock() {
                                     if eq.len() < 1024 { eq.push_back(event); }
@@ -1030,7 +1033,7 @@ impl LxmfNode {
                                     hex::encode(&src));
                             }
                         }
-                        let event = lxmf_event_from_bytes(src, data);
+                        let event = lxmf_event_from_bytes(src, data, None);
                         persist_inbound_message(&store_data, &event);
                         if let Ok(mut eq) = events_data.lock() {
                             if eq.len() < 1024 {
@@ -1062,7 +1065,7 @@ impl LxmfNode {
                                 let mut s = [0u8; 16]; s.copy_from_slice(&data[16..32]); s
                             } else { [0u8; 16] };
                             info!("LxmfNode full: resource complete {} bytes from {}", data.len(), hex::encode(&src));
-                            let lxmf_event = lxmf_event_from_bytes(src, data);
+                            let lxmf_event = lxmf_event_from_bytes(src, data, None);
                             persist_inbound_message(&store_res, &lxmf_event);
                             if let Ok(mut eq) = events_res.lock() {
                                 eq.push_back(lxmf_event);
@@ -1260,7 +1263,7 @@ impl LxmfNode {
                             Ok(dec) if dec.len() >= 97 => {
                                 let mut src = [0u8; 16];
                                 src.copy_from_slice(&dec[16..32]);
-                                let event = lxmf_event_from_bytes(src, dec.clone());
+                                let event = lxmf_event_from_bytes(src, dec.clone(), Some(dest));
                                 persist_inbound_message(&store_group, &event);
                                 if let Ok(mut eq) = events_group.lock() {
                                     if eq.len() < 1024 { eq.push_back(event); }
@@ -1874,7 +1877,7 @@ impl LxmfNode {
                             }
                         }
 
-                        let event = lxmf_event_from_bytes(src, data);
+                        let event = lxmf_event_from_bytes(src, data, None);
                         persist_inbound_message(&store_data, &event);
                         if let Ok(mut eq) = events_data.lock() {
                             if eq.len() < 1024 {
@@ -1906,7 +1909,7 @@ impl LxmfNode {
                                 let mut s = [0u8; 16]; s.copy_from_slice(&data[16..32]); s
                             } else { [0u8; 16] };
                             info!("LxmfNode BLE: resource complete {} bytes from {}", data.len(), hex::encode(&src));
-                            let lxmf_event = lxmf_event_from_bytes(src, data);
+                            let lxmf_event = lxmf_event_from_bytes(src, data, None);
                             persist_inbound_message(&store_res, &lxmf_event);
                             if let Ok(mut eq) = events_res.lock() {
                                 eq.push_back(lxmf_event);
@@ -1992,7 +1995,7 @@ impl LxmfNode {
                             Ok(dec) if dec.len() >= 97 => {
                                 let mut src = [0u8; 16];
                                 src.copy_from_slice(&dec[16..32]);
-                                let event = lxmf_event_from_bytes(src, dec.clone());
+                                let event = lxmf_event_from_bytes(src, dec.clone(), Some(dest));
                                 persist_inbound_message(&store_group, &event);
                                 if let Ok(mut eq) = events_group.lock() {
                                     if eq.len() < 1024 { eq.push_back(event); }
@@ -2153,7 +2156,7 @@ fn looks_like_rpc_response(data: &[u8]) -> bool {
 
 /// Decode an inbound LXMF wire payload and return a MessageReceived event.
 /// Falls back to raw body if the payload cannot be parsed.
-pub(crate) fn lxmf_event_from_bytes(src: LxmfAddress, data: Vec<u8>) -> LxmfEvent {
+pub(crate) fn lxmf_event_from_bytes(src: LxmfAddress, data: Vec<u8>, group_dest: Option<LxmfAddress>) -> LxmfEvent {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -2161,12 +2164,12 @@ pub(crate) fn lxmf_event_from_bytes(src: LxmfAddress, data: Vec<u8>) -> LxmfEven
     if let Some(dec) = decode_lxmf_payload(&data) {
         LxmfEvent::MessageReceived {
             source: src, title: dec.title, body: dec.body,
-            image: dec.image, files: dec.files, timestamp: ts,
+            image: dec.image, files: dec.files, timestamp: ts, group_dest,
         }
     } else {
         LxmfEvent::MessageReceived {
             source: src, title: vec![], body: data,
-            image: None, files: vec![], timestamp: ts,
+            image: None, files: vec![], timestamp: ts, group_dest,
         }
     }
 }
@@ -2175,10 +2178,11 @@ pub(crate) fn lxmf_event_from_bytes(src: LxmfAddress, data: Vec<u8>) -> LxmfEven
 /// No-op when store is absent or the event variant is not MessageReceived.
 pub(crate) fn persist_inbound_message(store: &Option<Arc<MessageStore>>, event: &LxmfEvent) {
     let s = match store { Some(s) => s, None => return };
-    if let LxmfEvent::MessageReceived { source, title, body, image, files, timestamp } = event {
-        let dest = [0u8; 16];
+    if let LxmfEvent::MessageReceived { source, title, body, image, files, timestamp, group_dest } = event {
+        let zero = [0u8; 16];
+        let dest = group_dest.as_ref().unwrap_or(&zero);
         let img_ref = image.as_ref().map(|(m, d)| (m.as_str(), d.as_slice()));
-        if let Err(e) = s.insert_inbound_message(source, &dest, title, body, img_ref, files, *timestamp) {
+        if let Err(e) = s.insert_inbound_message(source, dest, title, body, img_ref, files, *timestamp) {
             warn!("persist_inbound_message: SQLite error: {e}");
         }
     }

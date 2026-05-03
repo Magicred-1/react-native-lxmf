@@ -106,6 +106,7 @@ fn persist_inbound_message_helper_inserts_message_received_event() {
         image: None,
         files: vec![],
         timestamp: 1_700_000_000,
+        group_dest: None,
     };
     persist_inbound_message(&Some(store.clone()), &event);
     let json = store.fetch_messages(10).expect("fetch");
@@ -122,7 +123,7 @@ fn persist_inbound_message_helper_inserts_message_received_event() {
 fn persist_inbound_message_noop_on_none_store() {
     let event = LxmfEvent::MessageReceived {
         source: src(1),
-        title: vec![], body: vec![], image: None, files: vec![], timestamp: 0,
+        title: vec![], body: vec![], image: None, files: vec![], timestamp: 0, group_dest: None,
     };
     // must not panic
     persist_inbound_message(&None, &event);
