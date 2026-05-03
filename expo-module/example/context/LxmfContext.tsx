@@ -90,7 +90,7 @@ export type LxmfContextValue = {
   markRead: (address: string) => void;
   // Groups
   groups: Group[];
-  createGroup: (name: string) => string;
+  createGroup: (name: string) => { addrHex: string; keyHex: string };
   joinGroup: (addrHex: string, keyHex: string) => boolean;
   leaveGroup: (addrHex: string) => void;
   isGroup: (addrHex: string) => boolean;
@@ -312,14 +312,14 @@ export function LxmfProvider({ children }: { readonly children: React.ReactNode 
 
   // ── Group operations ──────────────────────────────────────────────────────
 
-  const createGroup = useCallback((name: string): string => {
+  const createGroup = useCallback((name: string): { addrHex: string; keyHex: string } => {
     const keyHex = generateKeyHex();
     const addrHex = lxmf.createGroup(name, keyHex);
     const group: Group = { addrHex, name, keyHex };
     const newMap = { ...groupMapRef.current, [addrHex]: group };
     groupMapRef.current = newMap;
     persistGroups(Object.values(newMap));
-    return addrHex;
+    return { addrHex, keyHex };
   }, [lxmf.createGroup, persistGroups]);
 
   const joinGroup = useCallback((addrHex: string, keyHex: string): boolean => {

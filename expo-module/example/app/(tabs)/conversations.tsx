@@ -89,9 +89,9 @@ function ContactRow({ contact, onPress }: Readonly<{ contact: Contact; onPress: 
 type GroupModalProps = {
   visible: boolean;
   onClose: () => void;
-  onCreated: (addrHex: string, name: string) => void;
+  onCreated: (addrHex: string) => void;
   onJoined: (addrHex: string) => void;
-  createGroup: (name: string) => string;
+  createGroup: (name: string) => { addrHex: string; keyHex: string };
   joinGroup: (addrHex: string, keyHex: string) => boolean;
 };
 
@@ -101,7 +101,7 @@ function GroupModal({ visible, onClose, onCreated, onJoined, createGroup, joinGr
   const [joinAddr, setJoinAddr] = useState('');
   const [joinKey, setJoinKey] = useState('');
   const [err, setErr] = useState('');
-  const [created, setCreated] = useState<{ addrHex: string; name: string } | null>(null);
+  const [created, setCreated] = useState<{ addrHex: string; keyHex: string; name: string } | null>(null);
 
   const reset = () => {
     setCreateName('');
@@ -118,8 +118,8 @@ function GroupModal({ visible, onClose, onCreated, onJoined, createGroup, joinGr
     const name = createName.trim();
     if (!name) { setErr('Enter a group name.'); return; }
     try {
-      const addrHex = createGroup(name);
-      setCreated({ addrHex, name });
+      const { addrHex, keyHex } = createGroup(name);
+      setCreated({ addrHex, keyHex, name });
       setErr('');
     } catch (e: any) {
       setErr(e?.message ?? 'Failed to create group.');
@@ -137,7 +137,7 @@ function GroupModal({ visible, onClose, onCreated, onJoined, createGroup, joinGr
   };
 
   const handleDone = () => {
-    if (created) onCreated(created.addrHex, created.name);
+    if (created) onCreated(created.addrHex);
     handleClose();
   };
 
@@ -184,14 +184,15 @@ function GroupModal({ visible, onClose, onCreated, onJoined, createGroup, joinGr
 
           {tab === 'create' && created && (
             <>
-              <Text style={S.modalHint}>Group created. Share these details with members.</Text>
+              <Text style={S.modalHint}>Group created. Share address + key with members — both are required to join.</Text>
               <View style={S.inviteBox}>
                 <Text style={S.inviteLabel}>Name</Text>
                 <Text selectable style={S.inviteValue}>{created.name}</Text>
-                <Text style={S.inviteLabel}>Address</Text>
+                <Text style={S.inviteLabel}>Address (32 hex)</Text>
                 <Text selectable style={S.inviteValue}>{created.addrHex}</Text>
+                <Text style={S.inviteLabel}>Key (64 hex)</Text>
+                <Text selectable style={S.inviteValue}>{created.keyHex}</Text>
               </View>
-              <Text style={S.modalHint}>Members need the address AND key (tap Share to send both).</Text>
               <View style={S.modalBtns}>
                 <Pressable style={[S.modalBtn, S.modalBtnCancel]} onPress={handleDone}>
                   <Text style={S.modalBtnText}>Open Chat</Text>
