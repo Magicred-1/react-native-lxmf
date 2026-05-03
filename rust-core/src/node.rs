@@ -507,11 +507,12 @@ impl LxmfNode {
                                 continue;
                             }
                             None => {
-                                // Identity not cached yet — path request already fired above.
-                                // Drop this message; the re-announce will let the next one through.
-                                warn!("LxmfNode: dropping message from unannounced peer {} (path requested)",
+                                // Identity not cached yet — accept anyway per LXMF spec.
+                                // Sender identity is embedded in the packet; request_path
+                                // already fired so the peer will re-announce and future
+                                // messages will be signature-verified.
+                                warn!("LxmfNode: accepting message from unknown peer {} (unverified, path requested)",
                                     hex::encode(&src));
-                                continue;
                             }
                         }
                         let event = lxmf_event_from_bytes(src, data);
@@ -989,9 +990,8 @@ impl LxmfNode {
                                 continue;
                             }
                             None => {
-                                warn!("LxmfNode full: dropping message from unannounced peer {} (path requested)",
+                                warn!("LxmfNode full: accepting message from unknown peer {} (unverified, path requested)",
                                     hex::encode(&src));
-                                continue;
                             }
                         }
                         let event = lxmf_event_from_bytes(src, data);
@@ -1636,10 +1636,9 @@ impl LxmfNode {
                         if data.len() >= 32 {
                             let sender_hash = src;
 
-                            // Fire request_path unconditionally — even if we drop this
-                            // message (unknown peer), the path request prompts the peer
-                            // to re-announce so their identity enters peer_identities and
-                            // the next message passes signature verification.
+                            // Fire request_path unconditionally so the peer re-announces
+                            // and their identity enters peer_identities — future messages
+                            // from this source will then be signature-verified.
                             let t = Arc::clone(&transport_data);
                             tokio::spawn(async move {
                                 use rns_transport::hash::AddressHash;
@@ -1658,10 +1657,8 @@ impl LxmfNode {
                                     continue;
                                 }
                                 None => {
-                                    // Drop message; request_path already fired above.
-                                    warn!("LxmfNode BLE: dropping message from unannounced peer {} (no identity cached)",
+                                    warn!("LxmfNode BLE: accepting message from unknown peer {} (unverified, path requested)",
                                         hex::encode(&sender_hash));
-                                    continue;
                                 }
                             }
                         }
