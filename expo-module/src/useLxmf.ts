@@ -417,6 +417,47 @@ export function useLxmf(options: UseLxmfOptions = {}) {
     }
   }, []);
 
+  /** Create a group channel with a shared AES key. Returns the group address hex. */
+  const createGroup = useCallback((name: string, keyHex: string): string => {
+    try {
+      return LxmfModule.createGroup(name, keyHex);
+    } catch (e: any) {
+      setError(e?.message ?? 'createGroup failed');
+      return '';
+    }
+  }, []);
+
+  /** Join an existing group channel by address and shared AES key. */
+  const joinGroup = useCallback((addrHex: string, keyHex: string): boolean => {
+    try {
+      return LxmfModule.joinGroup(addrHex, keyHex);
+    } catch (e: any) {
+      setError(e?.message ?? 'joinGroup failed');
+      return false;
+    }
+  }, []);
+
+  /** Leave a group channel and forget its key. */
+  const leaveGroup = useCallback((addrHex: string): boolean => {
+    try {
+      return LxmfModule.leaveGroup(addrHex);
+    } catch (e: any) {
+      setError(e?.message ?? 'leaveGroup failed');
+      return false;
+    }
+  }, []);
+
+  /** Send a message to a group channel. Returns sequence number or -1 on error. */
+  const sendGroup = useCallback(async (addrHex: string, bodyBase64: string, media?: LxmfMedia): Promise<number> => {
+    try {
+      const fieldsJson = media ? JSON.stringify(media) : undefined;
+      return await LxmfModule.sendGroup(addrHex, bodyBase64, fieldsJson);
+    } catch (e: any) {
+      setError(e?.message ?? 'sendGroup failed');
+      return -1;
+    }
+  }, []);
+
   return {
     // State
     status,
@@ -442,5 +483,9 @@ export function useLxmf(options: UseLxmfOptions = {}) {
     getNusUnpairedRNodes,
     pairNusRNode,
     beaconRpc,
+    createGroup,
+    joinGroup,
+    leaveGroup,
+    sendGroup,
   };
 }

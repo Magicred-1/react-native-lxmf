@@ -143,6 +143,31 @@ func lxmf_beacon_rpc(
     _ paramsJson: UnsafePointer<CChar>?
 ) -> Int64
 
+@_silgen_name("lxmf_create_group")
+func lxmf_create_group(
+    _ name: UnsafePointer<CChar>?,
+    _ keyHex: UnsafePointer<CChar>?,
+    _ outAddrBuf: UnsafeMutablePointer<UInt8>?,
+    _ outAddrLen: Int
+) -> Int32
+
+@_silgen_name("lxmf_join_group")
+func lxmf_join_group(
+    _ addrHex: UnsafePointer<CChar>?,
+    _ keyHex: UnsafePointer<CChar>?
+) -> Int32
+
+@_silgen_name("lxmf_leave_group")
+func lxmf_leave_group(_ addrHex: UnsafePointer<CChar>?) -> Int32
+
+@_silgen_name("lxmf_send_group")
+func lxmf_send_group(
+    _ addrHex: UnsafePointer<CChar>?,
+    _ bodyPtr: UnsafePointer<UInt8>?,
+    _ bodyLen: Int,
+    _ fieldsJson: UnsafePointer<CChar>?
+) -> Int64
+
 
 public class LxmfModule: Module {
     // Shared JSON buffer for FFI calls (64KB)
@@ -380,6 +405,52 @@ public class LxmfModule: Module {
         // The identifier is a CoreBluetooth UUID string, not a MAC (iOS hides MACs since iOS 13).
         Function("pairNusRNode") { (identifier: String) -> Bool in
             return self.bleManager.connectRNode(identifier)
+        }
+
+        // --- Group Chat ---
+
+        Function("createGroup") { (name: String, keyHex: String) -> String in
+            var addrBuf = [UInt8](repeating: 0, count: 33)
+            let rc = name.withCString { namePtr in
+                keyHex.withCString { keyPtr in
+                    lxmf_create_group(namePtr, keyPtr, &addrBuf, 33)
+                }
+            }
+            guard rc == 0 else { throw NSError(domain: "LxmfGroup", code: -1) }
+            return String(bytes: addrBuf.prefix(while: { $0 != 0 }), encoding: .utf8) ?? ""
+        }
+
+        Function("joinGroup") { (addrHex: String, keyHex: String) -> Bool in
+            let rc = addrHex.withCString { addrPtr in
+                keyHex.withCString { keyPtr in
+                    lxmf_join_group(addrPtr, keyPtr)
+                }
+            }
+            return rc == 0
+        }
+
+        Function("leaveGroup") { (addrHex: String) -> Bool in
+            let rc = addrHex.withCString { lxmf_leave_group($0) }
+            return rc == 0
+        }
+
+        AsyncFunction("sendGroup") { (addrHex: String, bodyBase64: String, fieldsJson: String?) -> Double in
+            guard let bodyData = Data(base64Encoded: bodyBase64) else {
+                throw NSError(domain: "LxmfGroup", code: -2, userInfo: [NSLocalizedDescriptionKey: "invalid base64 body"])
+            }
+            let seq = addrHex.withCString { addrPtr in
+                bodyData.withUnsafeBytes { bodyBuf -> Int64 in
+                    guard let bodyPtr = bodyBuf.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return -1 }
+                    if let fields = fieldsJson {
+                        return fields.withCString { fieldsPtr in
+                            lxmf_send_group(addrPtr, bodyPtr, bodyData.count, fieldsPtr)
+                        }
+                    }
+                    return lxmf_send_group(addrPtr, bodyPtr, bodyData.count, nil)
+                }
+            }
+            if seq < 0 { throw NSError(domain: "LxmfGroup", code: -3) }
+            return Double(seq)
         }
     }
 

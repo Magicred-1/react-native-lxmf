@@ -703,6 +703,42 @@ impl LxmfNode {
 
         info!("LxmfNode: LXMF delivery address = {}", addr_hex);
 
+        // Spawn group channel receiver — intercepts raw GROUP-type packets for joined groups.
+        let events_group = Arc::clone(&events);
+        let store_group = store_arc.clone();
+        let group_iface_rx = rt.block_on(async { transport_arc.lock().await.iface_rx() });
+        task_handles.push(rt.spawn(async move {
+            let mut rx = group_iface_rx;
+            loop {
+                match rx.recv().await {
+                    Ok(msg) => {
+                        use rns_transport::packet::DestinationType;
+                        if msg.packet.header.destination_type != DestinationType::Group { continue; }
+                        let Ok(dest): Result<[u8; 16], _> = msg.packet.destination.as_slice().try_into() else { continue };
+                        let Some(key) = crate::group::lookup_key(&dest) else { continue };
+                        let raw = msg.packet.data.as_slice();
+                        match crate::group::group_decrypt(&key, raw) {
+                            Ok(dec) if dec.len() >= 97 => {
+                                let mut src = [0u8; 16];
+                                src.copy_from_slice(&dec[16..32]);
+                                let event = lxmf_event_from_bytes(src, dec.clone());
+                                persist_inbound_message(&store_group, &event);
+                                if let Ok(mut eq) = events_group.lock() {
+                                    if eq.len() < 1024 { eq.push_back(event); }
+                                }
+                            }
+                            Ok(_) => warn!("Group RX: decrypted payload too short"),
+                            Err(e) => warn!("Group RX: decrypt failed for {}: {:?}", hex::encode(&dest), e),
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("LxmfNode Group RX: lagged {} events", n);
+                    }
+                    Err(_) => break,
+                }
+            }
+        }));
+
         // Update node state
         let mut guard = Self::global().lock().map_err(|e| e.to_string())?;
         let node = guard.as_mut().ok_or("Node not initialized")?;
@@ -1208,6 +1244,42 @@ impl LxmfNode {
 
         info!("LxmfNode full: TCP+BLE delivery address = {}", addr_hex);
 
+        // Group channel receiver
+        let events_group = Arc::clone(&events);
+        let store_group = store_arc.clone();
+        let group_iface_rx = rt.block_on(async { transport_arc.lock().await.iface_rx() });
+        task_handles.push(rt.spawn(async move {
+            let mut rx = group_iface_rx;
+            loop {
+                match rx.recv().await {
+                    Ok(msg) => {
+                        use rns_transport::packet::DestinationType;
+                        if msg.packet.header.destination_type != DestinationType::Group { continue; }
+                        let Ok(dest): Result<[u8; 16], _> = msg.packet.destination.as_slice().try_into() else { continue };
+                        let Some(key) = crate::group::lookup_key(&dest) else { continue };
+                        let raw = msg.packet.data.as_slice();
+                        match crate::group::group_decrypt(&key, raw) {
+                            Ok(dec) if dec.len() >= 97 => {
+                                let mut src = [0u8; 16];
+                                src.copy_from_slice(&dec[16..32]);
+                                let event = lxmf_event_from_bytes(src, dec.clone());
+                                persist_inbound_message(&store_group, &event);
+                                if let Ok(mut eq) = events_group.lock() {
+                                    if eq.len() < 1024 { eq.push_back(event); }
+                                }
+                            }
+                            Ok(_) => warn!("Group RX full: decrypted payload too short"),
+                            Err(e) => warn!("Group RX full: decrypt failed for {}: {:?}", hex::encode(&dest), e),
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("LxmfNode full Group RX: lagged {} events", n);
+                    }
+                    Err(_) => break,
+                }
+            }
+        }));
+
         let mut guard = Self::global().lock().map_err(|e| e.to_string())?;
         let node = guard.as_mut().ok_or("Node not initialized")?;
         node.running = true;
@@ -1406,6 +1478,147 @@ impl LxmfNode {
                 Err(format!("failed to encrypt packet for /{dest_hex}/"))
             }
         }
+    }
+
+    /// Create a new group channel and register it for inbound decryption.
+    ///
+    /// `name`    — human-readable group name; used to derive the deterministic group address.
+    /// `key_hex` — 32 hex chars (16 bytes) shared AES key; all members must use the same key.
+    ///
+    /// Returns the group address hex (32 chars) that peers send messages to.
+    pub fn create_group(name: &str, key_hex: &str) -> Result<String, String> {
+        let key_bytes = hex::decode(key_hex)
+            .map_err(|e| format!("Invalid key hex: {e}"))?;
+        if key_bytes.len() != 16 {
+            return Err(format!("key must be 16 bytes (32 hex chars), got {}", key_bytes.len()));
+        }
+        let mut key = [0u8; 16];
+        key.copy_from_slice(&key_bytes);
+        let addr = crate::group::group_address_hash(name);
+        crate::group::register(addr, key);
+        info!("Group: created/joined '{}' addr={}", name, hex::encode(&addr));
+        Ok(hex::encode(&addr))
+    }
+
+    /// Join an existing group channel by its address and shared key.
+    ///
+    /// Use when you know the group address already (received from another member).
+    pub fn join_group(group_addr_hex: &str, key_hex: &str) -> Result<(), String> {
+        let addr_bytes = hex::decode(group_addr_hex)
+            .map_err(|e| format!("Invalid addr hex: {e}"))?;
+        if addr_bytes.len() != 16 {
+            return Err(format!("group addr must be 16 bytes, got {}", addr_bytes.len()));
+        }
+        let key_bytes = hex::decode(key_hex)
+            .map_err(|e| format!("Invalid key hex: {e}"))?;
+        if key_bytes.len() != 16 {
+            return Err(format!("key must be 16 bytes, got {}", key_bytes.len()));
+        }
+        let mut addr = [0u8; 16];
+        addr.copy_from_slice(&addr_bytes);
+        let mut key = [0u8; 16];
+        key.copy_from_slice(&key_bytes);
+        crate::group::register(addr, key);
+        info!("Group: joined {}", group_addr_hex);
+        Ok(())
+    }
+
+    /// Leave a group channel — stop receiving its messages.
+    pub fn leave_group(group_addr_hex: &str) -> Result<(), String> {
+        let addr_bytes = hex::decode(group_addr_hex)
+            .map_err(|e| format!("Invalid addr hex: {e}"))?;
+        if addr_bytes.len() != 16 {
+            return Err(format!("group addr must be 16 bytes, got {}", addr_bytes.len()));
+        }
+        let mut addr = [0u8; 16];
+        addr.copy_from_slice(&addr_bytes);
+        crate::group::unregister(&addr);
+        info!("Group: left {}", group_addr_hex);
+        Ok(())
+    }
+
+    /// Send a message to a group channel.
+    ///
+    /// Builds a signed LXMF payload, Fernet-encrypts it with the shared group key,
+    /// and dispatches as a Reticulum GROUP packet (broadcast to all connected interfaces).
+    pub fn send_group(group_addr_hex: &str, content: &[u8], media_json: Option<&str>) -> Result<u64, String> {
+        use rns_transport::hash::AddressHash;
+        use rns_transport::identity::PrivateIdentity;
+        use rns_transport::packet::{DestinationType, Header, Packet, PacketDataBuffer};
+
+        let dest_bytes = hex::decode(group_addr_hex)
+            .map_err(|e| format!("Invalid group addr hex: {e}"))?;
+        if dest_bytes.len() != 16 {
+            return Err(format!("group addr must be 16 bytes, got {}", dest_bytes.len()));
+        }
+        let mut dest_arr = [0u8; 16];
+        dest_arr.copy_from_slice(&dest_bytes);
+
+        let key = crate::group::lookup_key(&dest_arr)
+            .ok_or_else(|| format!("Not joined to group {group_addr_hex}"))?;
+
+        let (transport, identity_bytes, source_hash_bytes, seq, events) = {
+            let mut guard = Self::global().lock().map_err(|e| e.to_string())?;
+            let node = guard.as_mut().ok_or("Node not initialized")?;
+            let transport = node.transport.clone().ok_or("Transport not started (mode 3/4 only)")?;
+            let id_bytes = node.identity_bytes.clone().ok_or("No identity available")?;
+            let addr_hex = node.address_hex.clone();
+            let src = hex::decode(&addr_hex).map_err(|e| format!("Bad address hex: {e}"))?;
+            let seq = node.outbound_sent;
+            node.outbound_sent += 1;
+            let events = Arc::clone(&node.events);
+            (transport, id_bytes, src, seq, events)
+        };
+
+        if source_hash_bytes.len() != 16 {
+            return Err(format!("source address must be 16 bytes, got {}", source_hash_bytes.len()));
+        }
+
+        let private_identity = PrivateIdentity::from_private_key_bytes(&identity_bytes)
+            .map_err(|e| format!("Failed to restore identity: {:?}", e))?;
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+        let fields_mp = build_fields_msgpack(media_json);
+        let msgpack = encode_lxmf_msgpack(timestamp, b"", content, &fields_mp);
+
+        // Sign dest+src+msgpack so recipients can verify authorship once they cache our identity.
+        let mut sign_data = Vec::with_capacity(16 + 16 + msgpack.len());
+        sign_data.extend_from_slice(&dest_arr);
+        sign_data.extend_from_slice(&source_hash_bytes);
+        sign_data.extend_from_slice(&msgpack);
+        let signature = private_identity.sign(&sign_data).to_bytes();
+
+        let mut lxmf_payload = Vec::with_capacity(16 + 16 + 64 + msgpack.len());
+        lxmf_payload.extend_from_slice(&dest_arr);
+        lxmf_payload.extend_from_slice(&source_hash_bytes);
+        lxmf_payload.extend_from_slice(&signature);
+        lxmf_payload.extend_from_slice(&msgpack);
+
+        let encrypted = crate::group::group_encrypt(&key, &lxmf_payload)
+            .map_err(|e| format!("Group encrypt failed: {:?}", e))?;
+
+        let packet = Packet {
+            header: Header {
+                destination_type: DestinationType::Group,
+                ..Header::default()
+            },
+            destination: AddressHash::new(dest_arr),
+            data: PacketDataBuffer::new_from_slice(&encrypted),
+            ..Packet::default()
+        };
+
+        get_runtime().block_on(async move {
+            transport.lock().await.send_packet(packet).await;
+        });
+
+        info!("LxmfNode::send_group: seq={} group={}", seq, group_addr_hex);
+        if let Ok(mut eq) = events.lock() {
+            eq.push_back(LxmfEvent::MessageQueued { seq, dest_hex: group_addr_hex.to_string() });
+        }
+        Ok(seq)
     }
 
     /// Start in BLE-only mode (mode 0).
@@ -1762,6 +1975,42 @@ impl LxmfNode {
                     .await
                     .send_announce(&dest_reannounce, Some(name_bytes_reann.as_slice()))
                     .await;
+            }
+        }));
+
+        // Group channel receiver (BLE mode)
+        let events_group = Arc::clone(&events);
+        let store_group = store_arc.clone();
+        let group_iface_rx = rt.block_on(async { transport_arc.lock().await.iface_rx() });
+        task_handles.push(rt.spawn(async move {
+            let mut rx = group_iface_rx;
+            loop {
+                match rx.recv().await {
+                    Ok(msg) => {
+                        use rns_transport::packet::DestinationType;
+                        if msg.packet.header.destination_type != DestinationType::Group { continue; }
+                        let Ok(dest): Result<[u8; 16], _> = msg.packet.destination.as_slice().try_into() else { continue };
+                        let Some(key) = crate::group::lookup_key(&dest) else { continue };
+                        let raw = msg.packet.data.as_slice();
+                        match crate::group::group_decrypt(&key, raw) {
+                            Ok(dec) if dec.len() >= 97 => {
+                                let mut src = [0u8; 16];
+                                src.copy_from_slice(&dec[16..32]);
+                                let event = lxmf_event_from_bytes(src, dec.clone());
+                                persist_inbound_message(&store_group, &event);
+                                if let Ok(mut eq) = events_group.lock() {
+                                    if eq.len() < 1024 { eq.push_back(event); }
+                                }
+                            }
+                            Ok(_) => warn!("Group RX BLE: decrypted payload too short"),
+                            Err(e) => warn!("Group RX BLE: decrypt failed for {}: {:?}", hex::encode(&dest), e),
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("LxmfNode BLE Group RX: lagged {} events", n);
+                    }
+                    Err(_) => break,
+                }
             }
         }));
 

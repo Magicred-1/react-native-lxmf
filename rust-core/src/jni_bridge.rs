@@ -301,6 +301,101 @@ pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeBroadcast(
     sent
 }
 
+// --- Group Chat ---
+
+/// Create or join a group by name + 16-byte key hex. Returns group address hex string.
+#[no_mangle]
+pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeCreateGroup(
+    mut env: JNIEnv,
+    _class: JClass,
+    name: JString,
+    key_hex: JString,
+) -> jstring {
+    let name_str: String = match env.get_string(&name) {
+        Ok(s) => s.into(),
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let key_str: String = match env.get_string(&key_hex) {
+        Ok(s) => s.into(),
+        Err(_) => return std::ptr::null_mut(),
+    };
+    match LxmfNode::create_group(&name_str, &key_str) {
+        Ok(addr_hex) => match env.new_string(&addr_hex) {
+            Ok(s) => s.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        },
+        Err(e) => { error!("nativeCreateGroup: {e}"); std::ptr::null_mut() }
+    }
+}
+
+/// Join a group by pre-known address hex + key hex.
+#[no_mangle]
+pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeJoinGroup(
+    mut env: JNIEnv,
+    _class: JClass,
+    addr_hex: JString,
+    key_hex: JString,
+) -> jint {
+    let addr_str: String = match env.get_string(&addr_hex) {
+        Ok(s) => s.into(),
+        Err(_) => return -1,
+    };
+    let key_str: String = match env.get_string(&key_hex) {
+        Ok(s) => s.into(),
+        Err(_) => return -1,
+    };
+    match LxmfNode::join_group(&addr_str, &key_str) {
+        Ok(()) => 0,
+        Err(e) => { error!("nativeJoinGroup: {e}"); -1 }
+    }
+}
+
+/// Leave a group.
+#[no_mangle]
+pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeLeaveGroup(
+    mut env: JNIEnv,
+    _class: JClass,
+    addr_hex: JString,
+) -> jint {
+    let addr_str: String = match env.get_string(&addr_hex) {
+        Ok(s) => s.into(),
+        Err(_) => return -1,
+    };
+    match LxmfNode::leave_group(&addr_str) {
+        Ok(()) => 0,
+        Err(e) => { error!("nativeLeaveGroup: {e}"); -1 }
+    }
+}
+
+/// Send a message to a group channel. Returns seq number or -1 on error.
+#[no_mangle]
+pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeSendGroup(
+    mut env: JNIEnv,
+    _class: JClass,
+    addr_hex: JString,
+    body_b64: JString,
+    fields_json: JString,
+) -> jlong {
+    let addr_str: String = match env.get_string(&addr_hex) {
+        Ok(s) => s.into(),
+        Err(_) => return -1,
+    };
+    let body_b64_str: String = match env.get_string(&body_b64) {
+        Ok(s) => s.into(),
+        Err(_) => return -1,
+    };
+    use base64::Engine as _;
+    let body = match base64::engine::general_purpose::STANDARD.decode(&body_b64_str) {
+        Ok(b) => b,
+        Err(e) => { error!("nativeSendGroup: base64 decode failed: {e}"); return -1; }
+    };
+    let media_str: Option<String> = env.get_string(&fields_json).ok().map(|s| s.into());
+    match LxmfNode::send_group(&addr_str, &body, media_str.as_deref()) {
+        Ok(seq) => seq as jlong,
+        Err(e) => { error!("nativeSendGroup: {e}"); -1 }
+    }
+}
+
 // --- Beacon RPC ---
 
 /// Queue a JSON-RPC 2.0 call to a specific beacon via its dest hash hex.

@@ -175,6 +175,26 @@ class LxmfModule : Module() {
     Function("pairNusRNode") { mac: String ->
       nusManager?.pairRNode(mac) ?: false
     }
+
+    // --- Group Chat ---
+
+    Function("createGroup") { name: String, keyHex: String ->
+      nativeCreateGroup(name, keyHex) ?: throw RuntimeException("createGroup failed")
+    }
+
+    Function("joinGroup") { addrHex: String, keyHex: String ->
+      nativeJoinGroup(addrHex, keyHex) == 0
+    }
+
+    Function("leaveGroup") { addrHex: String ->
+      nativeLeaveGroup(addrHex) == 0
+    }
+
+    AsyncFunction("sendGroup") { addrHex: String, bodyBase64: String, fieldsJson: String? ->
+      val seq = nativeSendGroup(addrHex, bodyBase64, fieldsJson)
+      if (seq < 0) throw RuntimeException("sendGroup failed")
+      seq.toDouble()
+    }
   }
 
   private fun drainAndEmitEvents() {
@@ -246,6 +266,10 @@ class LxmfModule : Module() {
   private external fun nativeBeaconRpc(destHashHex: String, method: String, paramsJson: String?): Long
   private external fun nativeSetLogLevel(level: Int): Int
   private external fun nativeAbiVersion(): Int
+  private external fun nativeCreateGroup(name: String, keyHex: String): String?
+  private external fun nativeJoinGroup(addrHex: String, keyHex: String): Int
+  private external fun nativeLeaveGroup(addrHex: String): Int
+  private external fun nativeSendGroup(addrHex: String, bodyBase64: String, fieldsJson: String?): Long
 
   // NUS JNI — called by NusManager (same package)
   external fun nativeNusReceive(data: ByteArray)

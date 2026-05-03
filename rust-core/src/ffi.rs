@@ -319,6 +319,99 @@ pub unsafe extern "C" fn lxmf_broadcast(
     sent
 }
 
+// --- Group Chat ---
+
+/// Create or join a group by name + 16-byte shared key.
+/// Returns the 32-char group address hex in `out_addr_buf` (must be ≥ 33 bytes).
+/// Returns STATUS_OK on success, STATUS_ERR on failure.
+#[no_mangle]
+pub unsafe extern "C" fn lxmf_create_group(
+    name_ptr: *const c_char,
+    key_hex_ptr: *const c_char,
+    out_addr_buf: *mut u8,
+    out_addr_len: usize,
+) -> i32 {
+    if name_ptr.is_null() || key_hex_ptr.is_null() || out_addr_buf.is_null() { return STATUS_ERR; }
+    let name = match CStr::from_ptr(name_ptr).to_str() {
+        Ok(s) => s,
+        Err(_) => return STATUS_ERR,
+    };
+    let key_hex = match CStr::from_ptr(key_hex_ptr).to_str() {
+        Ok(s) => s,
+        Err(_) => return STATUS_ERR,
+    };
+    match LxmfNode::create_group(name, key_hex) {
+        Ok(addr_hex) => {
+            let bytes = addr_hex.as_bytes();
+            let copy_len = bytes.len().min(out_addr_len.saturating_sub(1));
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_addr_buf, copy_len);
+            *out_addr_buf.add(copy_len) = 0; // null-terminate
+            STATUS_OK
+        }
+        Err(e) => { error!("lxmf_create_group: {e}"); STATUS_ERR }
+    }
+}
+
+/// Join a group by its pre-known address hex + shared key hex.
+#[no_mangle]
+pub unsafe extern "C" fn lxmf_join_group(
+    addr_hex_ptr: *const c_char,
+    key_hex_ptr: *const c_char,
+) -> i32 {
+    if addr_hex_ptr.is_null() || key_hex_ptr.is_null() { return STATUS_ERR; }
+    let addr_hex = match CStr::from_ptr(addr_hex_ptr).to_str() {
+        Ok(s) => s,
+        Err(_) => return STATUS_ERR,
+    };
+    let key_hex = match CStr::from_ptr(key_hex_ptr).to_str() {
+        Ok(s) => s,
+        Err(_) => return STATUS_ERR,
+    };
+    match LxmfNode::join_group(addr_hex, key_hex) {
+        Ok(()) => STATUS_OK,
+        Err(e) => { error!("lxmf_join_group: {e}"); STATUS_ERR }
+    }
+}
+
+/// Leave a group — stop receiving its messages.
+#[no_mangle]
+pub unsafe extern "C" fn lxmf_leave_group(addr_hex_ptr: *const c_char) -> i32 {
+    if addr_hex_ptr.is_null() { return STATUS_ERR; }
+    let addr_hex = match CStr::from_ptr(addr_hex_ptr).to_str() {
+        Ok(s) => s,
+        Err(_) => return STATUS_ERR,
+    };
+    match LxmfNode::leave_group(addr_hex) {
+        Ok(()) => STATUS_OK,
+        Err(e) => { error!("lxmf_leave_group: {e}"); STATUS_ERR }
+    }
+}
+
+/// Send a message to a group channel.
+/// `body_ptr`/`body_len` — raw UTF-8 content bytes.
+/// Returns sequence number ≥ 0 on success, -1 on error.
+#[no_mangle]
+pub unsafe extern "C" fn lxmf_send_group(
+    addr_hex_ptr: *const c_char,
+    body_ptr: *const u8,
+    body_len: usize,
+    fields_json: *const c_char,
+) -> i64 {
+    if addr_hex_ptr.is_null() || body_ptr.is_null() { return -1; }
+    let addr_hex = match CStr::from_ptr(addr_hex_ptr).to_str() {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    let body = slice::from_raw_parts(body_ptr, body_len);
+    let media = if fields_json.is_null() { None } else {
+        CStr::from_ptr(fields_json).to_str().ok()
+    };
+    match LxmfNode::send_group(addr_hex, body, media) {
+        Ok(seq) => seq as i64,
+        Err(e) => { error!("lxmf_send_group: {e}"); -1 }
+    }
+}
+
 // --- Config ---
 
 #[no_mangle]

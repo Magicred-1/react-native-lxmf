@@ -51,6 +51,12 @@ export type NativeModuleType = {
   // RNode pairing — NUS/KISS BLE path
   getNusUnpairedRNodes(): string;
   pairNusRNode(mac: string): boolean;
+
+  // Group chat — Reticulum GROUP destination (shared AES key)
+  createGroup(name: string, keyHex: string): string;
+  joinGroup(addrHex: string, keyHex: string): boolean;
+  leaveGroup(addrHex: string): boolean;
+  sendGroup(addrHex: string, bodyBase64: string, fieldsJson?: string): Promise<number>;
 }
 
 const MISSING_NATIVE_MESSAGE =
@@ -84,6 +90,10 @@ const missingNativeShim: NativeModuleType = {
   beaconRpc: async () => throwMissingNative(),
   getNusUnpairedRNodes: () => throwMissingNative(),
   pairNusRNode: () => throwMissingNative(),
+  createGroup: () => throwMissingNative(),
+  joinGroup: () => throwMissingNative(),
+  leaveGroup: () => throwMissingNative(),
+  sendGroup: async () => throwMissingNative(),
 } as NativeModuleType;
 
 export const LxmfModule = LxmfModuleNative ?? missingNativeShim;
