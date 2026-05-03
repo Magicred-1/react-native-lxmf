@@ -139,7 +139,15 @@ function sortedContacts(map: Record<string, Contact>): Contact[] {
 
 function generateKeyHex(): string {
   const buf = new Uint8Array(32);
-  crypto.getRandomValues(buf);
+  const cryptoApi = globalThis.crypto ?? (globalThis as Record<string, any>).msCrypto;
+  if (cryptoApi?.getRandomValues) {
+    cryptoApi.getRandomValues(buf);
+  } else {
+    // Hermes < 0.12 or non-standard env: insecure fallback
+    for (let i = 0; i < buf.length; i++) {
+      buf[i] = Math.trunc(Math.random() * 256);
+    }
+  }
   return Array.from(buf, b => b.toString(16).padStart(2, '0')).join('');
 }
 
