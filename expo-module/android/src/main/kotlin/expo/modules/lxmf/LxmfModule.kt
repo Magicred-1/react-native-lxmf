@@ -8,7 +8,7 @@ import expo.modules.kotlin.modules.ModuleDefinition
 import org.json.JSONArray
 
 private const val TAG = "LxmfModule"
-private const val POLL_INTERVAL_MS = 80L
+private const val POLL_INTERVAL_MS = 16L
 
 class LxmfModule : Module() {
   private val pollHandler = Handler(Looper.getMainLooper())
