@@ -23,6 +23,9 @@ pub struct BeaconConfig {
     pub keypair: Option<ed25519_dalek::SigningKey>,
     /// Solana JSON-RPC endpoint URL (e.g. "https://api.mainnet-beta.solana.com").
     pub solana_rpc_url: Option<String>,
+    /// ble_revshare Anchor program address — deployment-specific (devnet vs mainnet).
+    /// Set once via `lxmf_set_program_id`; read by `lxmf_partial_sign_execute_payment`.
+    pub program_id: Option<[u8; 32]>,
 }
 
 // ── Request detection ─────────────────────────────────────────────────────────
@@ -116,8 +119,10 @@ async fn cosign_and_submit(
     // Sign the Solana message bytes (everything after the signature array)
     let message_bytes = tx_bytes[msg_start..].to_vec();
 
-    // TODO(security): verify message contains a valid execute_payment discriminator
-    // before signing, to prevent the beacon being used to co-sign arbitrary transactions.
+    if !verify_execute_payment_discriminator(&message_bytes) {
+        return error_response(request_id, -32602,
+            "cosignTransaction: transaction is not an execute_payment instruction");
+    }
 
     let sig: ed25519_dalek::Signature = keypair.sign(&message_bytes);
     tx_bytes[sig1_start..sig1_end].copy_from_slice(&sig.to_bytes());
@@ -177,6 +182,68 @@ async fn proxy_solana(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Verify the Solana legacy message contains an `execute_payment` Anchor instruction
+/// as its first (and expected only) instruction.
+///
+/// Parses the wire-format message header → accounts → blockhash → first instruction data
+/// and checks the opening 8 bytes against the Anchor discriminator for `execute_payment`.
+/// Returns false on any parse failure or discriminator mismatch.
+fn verify_execute_payment_discriminator(message_bytes: &[u8]) -> bool {
+    // Solana legacy message wire format:
+    //   [3 bytes]        header (num_required_sigs, num_readonly_signed, num_readonly_unsigned)
+    //   [compact_u16]    account_keys count (N)
+    //   [N × 32 bytes]   account keys
+    //   [32 bytes]       recent_blockhash
+    //   [compact_u16]    instruction count
+    //   --- first instruction ---
+    //   [1 byte]         program_id_index
+    //   [compact_u16]    account_indices count (M)
+    //   [M × 1 byte]     account indices
+    //   [compact_u16]    data length
+    //   [data_len bytes] instruction data (first 8 = Anchor discriminator)
+
+    if message_bytes.len() < 3 { return false; }
+    let mut cur = 3usize; // skip 3-byte message header
+
+    let (account_count, n) = match read_compact_u16(&message_bytes[cur..]) {
+        Some(v) => v, None => return false,
+    };
+    cur += n;
+    let account_bytes = (account_count as usize).saturating_mul(32);
+    if cur + account_bytes + 32 > message_bytes.len() { return false; }
+    cur += account_bytes; // skip account keys
+    cur += 32;            // skip recent blockhash
+
+    let (ix_count, n) = match read_compact_u16(&message_bytes[cur..]) {
+        Some(v) => v, None => return false,
+    };
+    if ix_count == 0 { return false; }
+    cur += n;
+
+    // First instruction: program_id_index (1 byte)
+    if cur >= message_bytes.len() { return false; }
+    cur += 1;
+
+    // Account indices
+    let (acct_idx_count, n) = match read_compact_u16(&message_bytes[cur..]) {
+        Some(v) => v, None => return false,
+    };
+    cur += n;
+    if cur + acct_idx_count as usize > message_bytes.len() { return false; }
+    cur += acct_idx_count as usize;
+
+    // Instruction data
+    let (data_len, n) = match read_compact_u16(&message_bytes[cur..]) {
+        Some(v) => v, None => return false,
+    };
+    cur += n;
+
+    if data_len < 8 || cur + 8 > message_bytes.len() { return false; }
+
+    let expected = crate::solana_tx::anchor_discriminator("execute_payment");
+    message_bytes[cur..cur + 8] == expected
+}
 
 /// Parse a Solana compact_u16 from the start of `data`.
 /// Returns `(value, bytes_consumed)` or `None` on malformed input.
@@ -277,6 +344,54 @@ mod tests {
         let resp = r#"{"jsonrpc":"2.0","id":1,"result":"5NG..."}"#;
         let compressed = compress_payload(resp.as_bytes());
         assert!(!is_rpc_request(&compressed));
+    }
+
+    /// Build a minimal Solana legacy message with a single instruction whose data
+    /// begins with the given 8-byte discriminator.
+    fn make_message_with_discriminator(discriminator: [u8; 8]) -> Vec<u8> {
+        let mut msg = Vec::new();
+        // Header: 2 required sigs, 0 read-only signed, 1 read-only unsigned
+        msg.extend_from_slice(&[2u8, 0u8, 1u8]);
+        // Account count: 3 (compact_u16 = single byte 0x03)
+        msg.push(0x03);
+        // 3 × 32-byte account keys (zeroed)
+        msg.extend_from_slice(&[0u8; 96]);
+        // Recent blockhash (32 bytes, zeroed)
+        msg.extend_from_slice(&[0u8; 32]);
+        // Instruction count: 1
+        msg.push(0x01);
+        // First instruction: program_id_index = 2
+        msg.push(2u8);
+        // Account indices count: 2 (compact_u16)
+        msg.push(0x02);
+        // Account indices
+        msg.extend_from_slice(&[0u8, 1u8]);
+        // Data length: 8 (compact_u16)
+        msg.push(0x08);
+        // Discriminator
+        msg.extend_from_slice(&discriminator);
+        msg
+    }
+
+    #[test]
+    fn discriminator_check_accepts_execute_payment() {
+        let disc = crate::solana_tx::anchor_discriminator("execute_payment");
+        let msg = make_message_with_discriminator(disc);
+        assert!(verify_execute_payment_discriminator(&msg));
+    }
+
+    #[test]
+    fn discriminator_check_rejects_other_instruction() {
+        // SystemProgram::Transfer has no Anchor discriminator — simulate with wrong 8 bytes
+        let wrong_disc = [0u8; 8];
+        let msg = make_message_with_discriminator(wrong_disc);
+        assert!(!verify_execute_payment_discriminator(&msg));
+    }
+
+    #[test]
+    fn discriminator_check_rejects_truncated_message() {
+        assert!(!verify_execute_payment_discriminator(&[]));
+        assert!(!verify_execute_payment_discriminator(&[0u8; 10]));
     }
 
     #[test]

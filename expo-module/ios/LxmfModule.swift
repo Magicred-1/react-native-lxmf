@@ -143,6 +143,32 @@ func lxmf_beacon_rpc(
     _ paramsJson: UnsafePointer<CChar>?
 ) -> Int64
 
+@_silgen_name("lxmf_partial_sign_execute_payment")
+func lxmf_partial_sign_execute_payment(
+    _ payerKey: UnsafePointer<UInt8>?,
+    _ nonceBh: UnsafePointer<UInt8>?,
+    _ accountsJson: UnsafePointer<CChar>?,
+    _ paramsJson: UnsafePointer<CChar>?,
+    _ outBuf: UnsafeMutablePointer<UInt8>?,
+    _ outCap: Int32
+) -> Int32
+
+@_silgen_name("lxmf_extract_nonce_blockhash")
+func lxmf_extract_nonce_blockhash(
+    _ accountDataB64: UnsafePointer<CChar>?,
+    _ outBuf: UnsafeMutablePointer<UInt8>?,
+    _ outCap: Int32
+) -> Int32
+
+@_silgen_name("lxmf_set_program_id")
+func lxmf_set_program_id(_ programIdHex: UnsafePointer<CChar>?) -> Int32
+
+@_silgen_name("lxmf_get_program_id")
+func lxmf_get_program_id(
+    _ outBuf: UnsafeMutablePointer<UInt8>?,
+    _ outCap: Int
+) -> Int32
+
 @_silgen_name("lxmf_beacon_set_keypair")
 func lxmf_beacon_set_keypair(
     _ keyBytes: UnsafePointer<UInt8>?,
@@ -421,7 +447,77 @@ public class LxmfModule: Module {
             return self.bleManager.connectRNode(identifier)
         }
 
+        // --- Solana tx building ---
+
+        Function("partialSignExecutePayment") { (payerKeyHex: String, nonceBlockhashHex: String,
+                                                  accountsJson: String, paramsJson: String) -> String? in
+            guard payerKeyHex.count == 64 else { return nil }
+            guard nonceBlockhashHex.count == 64 else { return nil }
+            var payerKey = [UInt8]()
+            var idx = payerKeyHex.startIndex
+            while idx < payerKeyHex.endIndex {
+                let next = payerKeyHex.index(idx, offsetBy: 2)
+                guard let byte = UInt8(payerKeyHex[idx..<next], radix: 16) else {
+                    for i in 0..<payerKey.count { payerKey[i] = 0 }
+                    return nil
+                }
+                payerKey.append(byte)
+                idx = next
+            }
+            var nonceKey = [UInt8]()
+            var idx2 = nonceBlockhashHex.startIndex
+            while idx2 < nonceBlockhashHex.endIndex {
+                let next2 = nonceBlockhashHex.index(idx2, offsetBy: 2)
+                guard let byte = UInt8(nonceBlockhashHex[idx2..<next2], radix: 16) else {
+                    for i in 0..<payerKey.count { payerKey[i] = 0 }
+                    return nil
+                }
+                nonceKey.append(byte)
+                idx2 = next2
+            }
+            var outBuf = [UInt8](repeating: 0, count: 1024)
+            let written = payerKey.withUnsafeBufferPointer { pkPtr in
+                nonceKey.withUnsafeBufferPointer { nhPtr in
+                    accountsJson.withCString { accts in
+                        paramsJson.withCString { prms in
+                            outBuf.withUnsafeMutableBufferPointer { outPtr in
+                                lxmf_partial_sign_execute_payment(
+                                    pkPtr.baseAddress, nhPtr.baseAddress,
+                                    accts, prms,
+                                    outPtr.baseAddress, Int32(outBuf.count))
+                            }
+                        }
+                    }
+                }
+            }
+            for i in 0..<payerKey.count { payerKey[i] = 0 }
+            guard written > 0 else { return nil }
+            return String(bytes: outBuf[0..<Int(written)], encoding: .utf8)
+        }
+
+        Function("extractNonceBlockhash") { (accountDataB64: String) -> String? in
+            var outBuf = [UInt8](repeating: 0, count: 64)
+            let written = accountDataB64.withCString { dataPtr in
+                outBuf.withUnsafeMutableBufferPointer { outPtr in
+                    lxmf_extract_nonce_blockhash(dataPtr, outPtr.baseAddress, Int32(outBuf.count))
+                }
+            }
+            guard written == 64 else { return nil }
+            return String(bytes: outBuf, encoding: .utf8)
+        }
+
         // --- Beacon configuration ---
+
+        Function("setProgramId") { (programIdHex: String) -> Bool in
+            return programIdHex.withCString { lxmf_set_program_id($0) == 0 }
+        }
+
+        Function("getProgramId") { () -> String? in
+            var out = [UInt8](repeating: 0, count: 64)
+            let n = out.withUnsafeMutableBufferPointer { lxmf_get_program_id($0.baseAddress, 64) }
+            guard n == 64 else { return nil }
+            return String(bytes: out, encoding: .utf8)
+        }
 
         Function("setBeaconKeypair") { (keyHex: String) -> Bool in
             guard keyHex.count == 64 || keyHex.count == 128 else { return false }

@@ -226,6 +226,119 @@ pub unsafe extern "C" fn lxmf_beacon_rpc(
     rpc_id
 }
 
+// --- Solana tx building ---
+
+#[derive(serde::Deserialize)]
+struct AccountsJson {
+    payer: String,
+    broadcaster: String,
+    #[serde(rename = "nonceAccount")] nonce_account: String,
+    #[serde(rename = "payerAta")]     payer_ata: String,
+    recipient: String,
+    #[serde(rename = "recipientAta")]   recipient_ata: String,
+    #[serde(rename = "broadcasterAta")] broadcaster_ata: String,
+    mint: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ParamsJson {
+    #[serde(rename = "compOffset")]       comp_offset: u64,
+    amount: u64,
+    #[serde(rename = "encryptedAmount")]  encrypted_amount: String, // 64-char hex → [u8; 32]
+    nonce: String,                                                   // decimal string → u128
+    #[serde(rename = "encryptionPubKey")] encryption_pub_key: String,
+}
+
+fn hex32(s: &str) -> Option<[u8; 32]> {
+    hex::decode(s).ok()?.try_into().ok()
+}
+
+/// Build and partially sign an execute_payment tx (slot 0 / payer only; slot 1 left zero for beacon).
+/// `payer_key`: 32-byte ed25519 seed. `nonce_bh`: 32-byte durable nonce blockhash.
+/// Writes base64 partial tx into `out_buf`; returns bytes written, or -1 on error.
+#[no_mangle]
+pub unsafe extern "C" fn lxmf_partial_sign_execute_payment(
+    payer_key:     *const u8,
+    nonce_bh:      *const u8,
+    accounts_json: *const c_char,
+    params_json:   *const c_char,
+    out_buf:       *mut u8,
+    out_cap:       usize,
+) -> i32 {
+    if payer_key.is_null() || nonce_bh.is_null() || accounts_json.is_null()
+        || params_json.is_null() || out_buf.is_null() { return -1; }
+
+    // Build signing key, zero seed immediately after
+    let seed_slice = std::slice::from_raw_parts(payer_key, 32);
+    let mut seed: [u8; 32] = match seed_slice.try_into() { Ok(s) => s, Err(_) => return -1 };
+    let keypair = ed25519_dalek::SigningKey::from_bytes(&seed);
+    seed.zeroize();
+
+    // Parse nonce blockhash
+    let nonce_slice = std::slice::from_raw_parts(nonce_bh, 32);
+    let nonce_blockhash: [u8; 32] = match nonce_slice.try_into() { Ok(b) => b, Err(_) => return -1 };
+
+    // Read program_id from BeaconConfig — must be set once via lxmf_set_program_id
+    let program_id: [u8; 32] = {
+        let guard = match LxmfNode::global().lock() { Ok(g) => g, Err(_) => return -1 };
+        let node = match guard.as_ref() { Some(n) => n, None => return -1 };
+        let cfg = match node.beacon_config.lock() { Ok(c) => c, Err(_) => return -1 };
+        match cfg.program_id { Some(p) => p, None => return -1 }
+    };
+
+    // Parse accounts JSON
+    let accts_str = match CStr::from_ptr(accounts_json).to_str() { Ok(s) => s, Err(_) => return -1 };
+    let accts: AccountsJson = match serde_json::from_str(accts_str) { Ok(a) => a, Err(_) => return -1 };
+    let accounts = crate::solana_tx::ExecutePaymentAccounts {
+        payer:          match hex32(&accts.payer)          { Some(b) => b, None => return -1 },
+        broadcaster:    match hex32(&accts.broadcaster)    { Some(b) => b, None => return -1 },
+        nonce_account:  match hex32(&accts.nonce_account)  { Some(b) => b, None => return -1 },
+        payer_ata:      match hex32(&accts.payer_ata)      { Some(b) => b, None => return -1 },
+        recipient:      match hex32(&accts.recipient)      { Some(b) => b, None => return -1 },
+        recipient_ata:  match hex32(&accts.recipient_ata)  { Some(b) => b, None => return -1 },
+        broadcaster_ata:match hex32(&accts.broadcaster_ata){ Some(b) => b, None => return -1 },
+        mint:           match hex32(&accts.mint)           { Some(b) => b, None => return -1 },
+        program_id,
+    };
+
+    // Parse params JSON
+    let prms_str = match CStr::from_ptr(params_json).to_str() { Ok(s) => s, Err(_) => return -1 };
+    let prms: ParamsJson = match serde_json::from_str(prms_str) { Ok(p) => p, Err(_) => return -1 };
+    let enc_amt: [u8; 32] = match hex32(&prms.encrypted_amount) { Some(b) => b, None => return -1 };
+    let nonce_u128: u128 = match prms.nonce.parse() { Ok(n) => n, Err(_) => return -1 };
+    let params = crate::solana_tx::ExecutePaymentParams {
+        comp_offset:        prms.comp_offset,
+        amount:             prms.amount,
+        encrypted_amount:   enc_amt,
+        nonce:              nonce_u128,
+        encryption_pub_key: match hex32(&prms.encryption_pub_key) { Some(b) => b, None => return -1 },
+    };
+
+    let tx_b64 = crate::solana_tx::partial_sign_execute_payment(&keypair, nonce_blockhash, &accounts, &params);
+    let bytes = tx_b64.as_bytes();
+    if bytes.len() > out_cap { return -1; }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
+    bytes.len() as i32
+}
+
+/// Parse the 32-byte durable nonce blockhash from a nonce account's base64 data field.
+/// Writes 64-char lowercase hex into `out_buf`; returns 64 on success, -1 on error.
+#[no_mangle]
+pub unsafe extern "C" fn lxmf_extract_nonce_blockhash(
+    account_data_b64: *const c_char,
+    out_buf:          *mut u8,
+    out_cap:          usize,
+) -> i32 {
+    if account_data_b64.is_null() || out_buf.is_null() { return -1; }
+    let s = match CStr::from_ptr(account_data_b64).to_str() { Ok(s) => s, Err(_) => return -1 };
+    let nonce = match crate::solana_tx::extract_nonce_blockhash(s) { Some(n) => n, None => return -1 };
+    let hex_str = hex::encode(nonce);
+    let bytes = hex_str.as_bytes();
+    if bytes.len() > out_cap { return -1; }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
+    bytes.len() as i32
+}
+
 // --- Beacon configuration ---
 
 /// Set the beacon's Solana signing keypair (ed25519).
@@ -286,6 +399,50 @@ pub unsafe extern "C" fn lxmf_beacon_set_solana_rpc_url(url: *const std::ffi::c_
         }
     };
     rc
+}
+
+/// Store the ble_revshare Anchor program address (deployment-specific: devnet vs mainnet).
+/// `program_id_hex` — null-terminated 64-char lowercase hex string (32 bytes).
+/// Returns 0 on success, -1 on error (null, wrong length, not initialized).
+#[no_mangle]
+pub unsafe extern "C" fn lxmf_set_program_id(program_id_hex: *const c_char) -> i32 {
+    if program_id_hex.is_null() { return -1; }
+    let hex_str = match CStr::from_ptr(program_id_hex).to_str() { Ok(s) => s, Err(_) => return -1 };
+    let pid: [u8; 32] = match hex32(hex_str) { Some(b) => b, None => return -1 };
+    let beacon_config = {
+        let guard = match LxmfNode::global().lock() { Ok(g) => g, Err(_) => return -1 };
+        match guard.as_ref() {
+            Some(n) => std::sync::Arc::clone(&n.beacon_config),
+            None => return -1,
+        }
+    };
+    let rc = match beacon_config.lock() {
+        Ok(mut cfg) => { cfg.program_id = Some(pid); 0i32 }
+        Err(_) => -1i32,
+    };
+    rc
+}
+
+/// Retrieve the currently stored program address as 64-char lowercase hex.
+/// `out_buf` must be at least 64 bytes. Returns 64 on success, -1 if not set or error.
+#[no_mangle]
+pub unsafe extern "C" fn lxmf_get_program_id(out_buf: *mut u8, out_cap: usize) -> i32 {
+    if out_buf.is_null() || out_cap < 64 { return -1; }
+    let beacon_config = {
+        let guard = match LxmfNode::global().lock() { Ok(g) => g, Err(_) => return -1 };
+        match guard.as_ref() {
+            Some(n) => std::sync::Arc::clone(&n.beacon_config),
+            None => return -1,
+        }
+    };
+    let pid = match beacon_config.lock() {
+        Ok(cfg) => match cfg.program_id { Some(p) => p, None => return -1 },
+        Err(_) => return -1,
+    };
+    let hex_str = hex::encode(pid);
+    let bytes = hex_str.as_bytes();
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, 64);
+    64
 }
 
 // --- Messages ---

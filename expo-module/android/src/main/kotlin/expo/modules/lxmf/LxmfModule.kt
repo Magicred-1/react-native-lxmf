@@ -187,7 +187,32 @@ class LxmfModule : Module() {
       nusManager?.pairRNode(mac) ?: false
     }
 
+    // --- Solana tx building ---
+
+    Function("partialSignExecutePayment") { payerKeyHex: String, nonceBlockhashHex: String,
+                                            accountsJson: String, paramsJson: String ->
+      val payerKey = try { payerKeyHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray() }
+                     catch (e: Exception) { return@Function null }
+      val nonceKey = try { nonceBlockhashHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray() }
+                     catch (e: Exception) { payerKey.fill(0); return@Function null }
+      val result = nativePartialSignExecutePayment(payerKey, nonceKey, accountsJson, paramsJson)
+      payerKey.fill(0)
+      result
+    }
+
+    Function("extractNonceBlockhash") { accountDataB64: String ->
+      nativeExtractNonceBlockhash(accountDataB64)
+    }
+
     // --- Beacon configuration ---
+
+    Function("setProgramId") { programIdHex: String ->
+      nativeSetProgramId(programIdHex) == 0
+    }
+
+    Function("getProgramId") {
+      nativeGetProgramId()
+    }
 
     Function("setBeaconKeypair") { keyHex: String ->
       val bytes = try {
@@ -294,6 +319,10 @@ class LxmfModule : Module() {
   private external fun nativeBeaconRpc(destHashHex: String, method: String, paramsJson: String?): Long
   private external fun nativeSetLogLevel(level: Int): Int
   private external fun nativeAbiVersion(): Int
+  private external fun nativePartialSignExecutePayment(payerKeyBytes: ByteArray, nonceBlockhash: ByteArray, accountsJson: String, paramsJson: String): String?
+  private external fun nativeExtractNonceBlockhash(accountDataB64: String): String?
+  private external fun nativeSetProgramId(programIdHex: String): Int
+  private external fun nativeGetProgramId(): String?
   private external fun nativeSetBeaconKeypair(keyBytes: ByteArray): Int
   private external fun nativeSetBeaconSolanaRpc(url: String): Int
   private external fun nativeCreateGroup(name: String, keyHex: String): String?

@@ -33,6 +33,35 @@ export interface LxmfMessageEvent {
   files?: { name: string; data: string }[];    // data = base64
 }
 
+export interface ExecutePaymentAccounts {
+  payer: string;           // 64-char hex (32-byte pubkey)
+  broadcaster: string;
+  nonceAccount: string;
+  payerAta: string;
+  recipient: string;
+  recipientAta: string;
+  broadcasterAta: string;
+  mint: string;
+  // programId is set once via setProgramId() — not a per-call argument
+}
+
+/** Well-known Solana program addresses as 64-char lowercase hex (no base58). */
+export const SOLANA_PUBKEYS = {
+  systemProgram:           '0000000000000000000000000000000000000000000000000000000000000000',
+  tokenProgram:            '06ddf6e1d765a193d9cbe146ceeb79ac1cb485ed5f5b37913a8cf5857eff00a9',
+  associatedTokenProgram:  '8c97258f4e2489f1bb3d1029148e0d830b5a1399daff1084048e7bd8dbe9f859',
+  sysvarRent:              '06a7d51718c774c928566398691d5eb68b5eb8a39b4b6d5c73555b2100000000',
+  sysvarRecentBlockhashes: '06a7d51713acca52218cc94c3d4af17f58daee089ba1fd44e3dbd98a00000000',
+} as const;
+
+export interface ExecutePaymentParams {
+  compOffset: number;       // u64 — safe for typical values
+  amount: number;           // u64
+  encryptedAmount: string;  // 64-char hex → [u8; 32]
+  nonce: string;            // decimal string → u128
+  encryptionPubKey: string; // 64-char hex → [u8; 32]
+}
+
 export interface RpcResponseEvent {
   id: number;
   method: string;
@@ -417,6 +446,16 @@ export function useLxmf(options: UseLxmfOptions = {}) {
     }
   }, []);
 
+  const setProgramId = useCallback((programIdHex: string): boolean => {
+    try { return LxmfModule.setProgramId(programIdHex); }
+    catch (e: any) { setError(e?.message ?? 'setProgramId failed'); return false; }
+  }, []);
+
+  const getProgramId = useCallback((): string | null => {
+    try { return LxmfModule.getProgramId(); }
+    catch { return null; }
+  }, []);
+
   const setBeaconKeypair = useCallback((keyHex: string): boolean => {
     try { return LxmfModule.setBeaconKeypair(keyHex); }
     catch (e: any) { setError(e?.message ?? 'setBeaconKeypair failed'); return false; }
@@ -425,6 +464,24 @@ export function useLxmf(options: UseLxmfOptions = {}) {
   const setBeaconSolanaRpc = useCallback((url: string): boolean => {
     try { return LxmfModule.setBeaconSolanaRpc(url); }
     catch (e: any) { setError(e?.message ?? 'setBeaconSolanaRpc failed'); return false; }
+  }, []);
+
+  const partialSignExecutePayment = useCallback((
+    payerKeyHex: string,
+    nonceBlockhashHex: string,
+    accounts: ExecutePaymentAccounts,
+    params: ExecutePaymentParams,
+  ): string | null => {
+    try {
+      return LxmfModule.partialSignExecutePayment(
+        payerKeyHex, nonceBlockhashHex,
+        JSON.stringify(accounts), JSON.stringify(params));
+    } catch (e: any) { setError(e?.message ?? 'partialSignExecutePayment failed'); return null; }
+  }, []);
+
+  const extractNonceBlockhash = useCallback((accountDataB64: string): string | null => {
+    try { return LxmfModule.extractNonceBlockhash(accountDataB64); }
+    catch (e: any) { setError(e?.message ?? 'extractNonceBlockhash failed'); return null; }
   }, []);
 
   /** Create a group channel with a shared AES key. Returns the group address hex. */
@@ -493,8 +550,12 @@ export function useLxmf(options: UseLxmfOptions = {}) {
     getNusUnpairedRNodes,
     pairNusRNode,
     beaconRpc,
+    setProgramId,
+    getProgramId,
     setBeaconKeypair,
     setBeaconSolanaRpc,
+    partialSignExecutePayment,
+    extractNonceBlockhash,
     createGroup,
     joinGroup,
     leaveGroup,

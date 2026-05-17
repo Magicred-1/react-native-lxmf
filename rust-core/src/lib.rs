@@ -9,6 +9,7 @@
 pub mod node;
 pub mod beacon;
 pub mod beacon_server;
+pub mod solana_tx;
 pub mod group;
 pub mod ble_iface;
 pub mod nus_iface;

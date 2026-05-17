@@ -458,6 +458,85 @@ pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeBeaconRpc(
     rpc_id
 }
 
+// --- Solana tx building ---
+
+#[no_mangle]
+pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativePartialSignExecutePayment(
+    mut env: JNIEnv,
+    _class: JClass,
+    payer_key:     JByteArray,
+    nonce_bh:      JByteArray,
+    accounts_json: JString,
+    params_json:   JString,
+) -> jstring {
+    use zeroize::Zeroize;
+    let mut payer_bytes = match jbytes_to_vec(&mut env, &payer_key) {
+        Ok(b) => b, Err(_) => return std::ptr::null_mut(),
+    };
+    if payer_bytes.len() != 32 { payer_bytes.zeroize(); return std::ptr::null_mut(); }
+
+    let nonce_bytes = match jbytes_to_vec(&mut env, &nonce_bh) {
+        Ok(b) => b, Err(_) => { payer_bytes.zeroize(); return std::ptr::null_mut(); }
+    };
+    if nonce_bytes.len() != 32 { payer_bytes.zeroize(); return std::ptr::null_mut(); }
+
+    let accts_str: String = match env.get_string(&accounts_json) {
+        Ok(s) => s.into(), Err(_) => { payer_bytes.zeroize(); return std::ptr::null_mut(); }
+    };
+    let params_str: String = match env.get_string(&params_json) {
+        Ok(s) => s.into(), Err(_) => { payer_bytes.zeroize(); return std::ptr::null_mut(); }
+    };
+
+    let accts_c = match std::ffi::CString::new(accts_str) {
+        Ok(s) => s, Err(_) => { payer_bytes.zeroize(); return std::ptr::null_mut(); }
+    };
+    let params_c = match std::ffi::CString::new(params_str) {
+        Ok(s) => s, Err(_) => { payer_bytes.zeroize(); return std::ptr::null_mut(); }
+    };
+
+    let mut out = [0u8; 1024];
+    let written = unsafe {
+        crate::ffi::lxmf_partial_sign_execute_payment(
+            payer_bytes.as_ptr(), nonce_bytes.as_ptr(),
+            accts_c.as_ptr(), params_c.as_ptr(),
+            out.as_mut_ptr(), out.len(),
+        )
+    };
+    payer_bytes.zeroize();
+    if written < 0 { return std::ptr::null_mut(); }
+
+    let s = match std::str::from_utf8(&out[..written as usize]) {
+        Ok(s) => s, Err(_) => return std::ptr::null_mut(),
+    };
+    match env.new_string(s) {
+        Ok(js) => js.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeExtractNonceBlockhash(
+    mut env: JNIEnv,
+    _class: JClass,
+    account_data_b64: JString,
+) -> jstring {
+    let data_str: String = match env.get_string(&account_data_b64) {
+        Ok(s) => s.into(), Err(_) => return std::ptr::null_mut(),
+    };
+    let data_c = match std::ffi::CString::new(data_str) {
+        Ok(s) => s, Err(_) => return std::ptr::null_mut(),
+    };
+    let mut out = [0u8; 64];
+    let written = unsafe {
+        crate::ffi::lxmf_extract_nonce_blockhash(data_c.as_ptr(), out.as_mut_ptr(), out.len())
+    };
+    if written != 64 { return std::ptr::null_mut(); }
+    match env.new_string(std::str::from_utf8(&out).unwrap_or("")) {
+        Ok(js) => js.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
 // --- Beacon configuration ---
 
 #[no_mangle]
@@ -494,6 +573,39 @@ pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeSetBeaconSolanaRpc(
         Err(_) => return -1,
     };
     unsafe { crate::ffi::lxmf_beacon_set_solana_rpc_url(c_str.as_ptr()) }
+}
+
+// --- Program ID ---
+
+#[no_mangle]
+pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeSetProgramId(
+    mut env: JNIEnv,
+    _class: JClass,
+    program_id_hex: JString,
+) -> jint {
+    let hex_str: String = match env.get_string(&program_id_hex) {
+        Ok(s) => s.into(),
+        Err(_) => return -1,
+    };
+    let c_str = match std::ffi::CString::new(hex_str) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+    unsafe { crate::ffi::lxmf_set_program_id(c_str.as_ptr()) }
+}
+
+#[no_mangle]
+pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeGetProgramId(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    let mut out = [0u8; 64];
+    let written = unsafe { crate::ffi::lxmf_get_program_id(out.as_mut_ptr(), out.len()) };
+    if written != 64 { return std::ptr::null_mut(); }
+    match env.new_string(std::str::from_utf8(&out).unwrap_or("")) {
+        Ok(js) => js.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
 }
 
 // --- Config ---
