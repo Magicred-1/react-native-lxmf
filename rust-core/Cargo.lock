@@ -920,7 +920,7 @@ dependencies = [
 [[package]]
 name = "rns-embedded-core"
 version = "0.1.0"
-source = "git+https://github.com/FreeTAKTeam/LXMF-rs.git#69a33fcf44b381f80b5c0c83afaadbdb4c873637"
+source = "git+https://github.com/FreeTAKTeam/LXMF-rs.git?rev=69a33fcf#69a33fcf44b381f80b5c0c83afaadbdb4c873637"
 dependencies = [
  "sha2",
 ]
@@ -928,7 +928,7 @@ dependencies = [
 [[package]]
 name = "rns-embedded-ffi"
 version = "0.1.0"
-source = "git+https://github.com/FreeTAKTeam/LXMF-rs.git#69a33fcf44b381f80b5c0c83afaadbdb4c873637"
+source = "git+https://github.com/FreeTAKTeam/LXMF-rs.git?rev=69a33fcf#69a33fcf44b381f80b5c0c83afaadbdb4c873637"
 dependencies = [
  "rns-embedded-core",
  "rns-embedded-runtime",
@@ -937,7 +937,7 @@ dependencies = [
 [[package]]
 name = "rns-embedded-runtime"
 version = "0.1.0"
-source = "git+https://github.com/FreeTAKTeam/LXMF-rs.git#69a33fcf44b381f80b5c0c83afaadbdb4c873637"
+source = "git+https://github.com/FreeTAKTeam/LXMF-rs.git?rev=69a33fcf#69a33fcf44b381f80b5c0c83afaadbdb4c873637"
 dependencies = [
  "rns-embedded-core",
 ]

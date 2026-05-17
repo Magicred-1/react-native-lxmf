@@ -1,5 +1,6 @@
-import Foundation
+import CryptoKit
 import CoreBluetooth
+import Foundation
 
 /// Dual-role BLE manager for Reticulum mesh networking
 ///
@@ -37,6 +38,11 @@ class BLEManager: NSObject {
     // so lxmf_ble_poll_tx frames can be routed to the correct peer.
     private var addrToPeripheralUUID: [Data: UUID] = [:]
     private var addrToCentral: [Data: CBCentral] = [:]
+
+    // Consecutive updateValue() false returns per central UUID — detects stale subscribers
+    // that CoreBluetooth didn't clean up on ATT-layer disconnect.
+    private var txUpdateFailures: [UUID: Int] = [:]
+    private static let txUpdateFailureThreshold = 5
 
     // RNode NUS connections — separate from mesh peers
     private var nusPeripherals: [UUID: CBPeripheral] = [:]
@@ -189,6 +195,21 @@ class BLEManager: NSObject {
         // peripheralManagerIsReady(toUpdateSubscribers:) fires when it drains.
         if let central = addrToCentral[addr], let txChar = txCharacteristic {
             let ok = peripheralManager?.updateValue(data, for: txChar, onSubscribedCentrals: [central]) ?? false
+            if ok {
+                txUpdateFailures[central.identifier] = 0
+            } else {
+                let count = (txUpdateFailures[central.identifier] ?? 0) + 1
+                txUpdateFailures[central.identifier] = count
+                if count >= BLEManager.txUpdateFailureThreshold {
+                    // updateValue has failed too many times — peer likely dead without firing didUnsubscribeFrom.
+                    subscribedCentrals.removeAll { $0.identifier == central.identifier }
+                    addrToCentral.removeValue(forKey: addr)
+                    txUpdateFailures.removeValue(forKey: central.identifier)
+                    addr.withUnsafeBytes { ptr in
+                        _ = lxmf_ble_disconnected(ptr.baseAddress?.assumingMemoryBound(to: UInt8.self))
+                    }
+                }
+            }
             return ok
         }
 
@@ -260,20 +281,11 @@ class BLEManager: NSObject {
         return true
     }
 
-    /// Derive a 6-byte pseudo-MAC from a CoreBluetooth UUID.
-    /// XOR-folds the 16-byte UUID into 6 bytes for stable peer identification.
+    /// Derive a stable 6-byte pseudo-MAC from a CoreBluetooth UUID.
+    /// Uses SHA-256 prefix instead of XOR-fold to eliminate collision risk.
     static func uuidToAddr(_ uuid: UUID) -> Data {
-        let u = uuid.uuid
-        let bytes: [UInt8] = [u.0, u.1, u.2, u.3, u.4, u.5, u.6, u.7,
-                              u.8, u.9, u.10, u.11, u.12, u.13, u.14, u.15]
-        return Data([
-            bytes[0] ^ bytes[6] ^ bytes[12],
-            bytes[1] ^ bytes[7] ^ bytes[13],
-            bytes[2] ^ bytes[8] ^ bytes[14],
-            bytes[3] ^ bytes[9] ^ bytes[15],
-            bytes[4] ^ bytes[10],
-            bytes[5] ^ bytes[11],
-        ])
+        let digest = SHA256.hash(data: Data(uuid.uuidString.utf8))
+        return Data(digest.prefix(6))
     }
 
     // MARK: - Peripheral Setup
@@ -572,6 +584,7 @@ extension BLEManager: CBPeripheralManagerDelegate {
                             didSubscribeTo characteristic: CBCharacteristic) {
         if !subscribedCentrals.contains(where: { $0.identifier == central.identifier }) {
             subscribedCentrals.append(central)
+            txUpdateFailures[central.identifier] = 0
             // Register central as a peer with Rust
             let addr = BLEManager.uuidToAddr(central.identifier)
             addrToCentral[addr] = central
@@ -589,6 +602,7 @@ extension BLEManager: CBPeripheralManagerDelegate {
     func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral,
                            didUnsubscribeFrom characteristic: CBCharacteristic) {
         subscribedCentrals.removeAll { $0.identifier == central.identifier }
+        txUpdateFailures.removeValue(forKey: central.identifier)
         // Notify Rust of central disconnection
         let addr = BLEManager.uuidToAddr(central.identifier)
         addrToCentral.removeValue(forKey: addr)

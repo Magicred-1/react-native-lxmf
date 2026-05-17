@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
 import android.util.Log
+import java.util.Collections
 import java.util.UUID
 
 private const val TAG = "LxmfBle"
@@ -43,11 +44,11 @@ class BleManager(
     private val mainHandler = Handler(Looper.getMainLooper())
 
     // Active GATT connections keyed by MAC address string
-    private val connections = mutableMapOf<String, BluetoothGatt>()
+    private val connections: MutableMap<String, BluetoothGatt> = Collections.synchronizedMap(mutableMapOf())
     // MACs we are currently trying to connect (avoid duplicate attempts)
-    private val connecting = mutableSetOf<String>()
+    private val connecting: MutableSet<String> = Collections.synchronizedSet(mutableSetOf())
     // Timestamp (ms) when each MAC last disconnected — enforces reconnect cooldown
-    private val disconnectedAt = mutableMapOf<String, Long>()
+    private val disconnectedAt: MutableMap<String, Long> = Collections.synchronizedMap(mutableMapOf())
 
     private var scanner: BluetoothLeScanner? = null
     private var advertiser: BluetoothLeAdvertiser? = null
@@ -61,9 +62,9 @@ class BleManager(
     private var serverTxChar: BluetoothGattCharacteristic? = null
     // Centrals that have enabled CCC notifications on our TX char, keyed by MAC.
     // Only these are "registered as peers" with Rust (mirrors iOS subscribedCentrals).
-    private val serverSubscribers = mutableMapOf<String, BluetoothDevice>()
+    private val serverSubscribers: MutableMap<String, BluetoothDevice> = Collections.synchronizedMap(mutableMapOf())
     // Buffer for ATT Long Write (preparedWrite=true) fragments from remote centrals.
-    private val preparedWriteBuffer = mutableMapOf<String, java.io.ByteArrayOutputStream>()
+    private val preparedWriteBuffer: MutableMap<String, java.io.ByteArrayOutputStream> = Collections.synchronizedMap(mutableMapOf())
 
     // TX polling — every 50 ms drain the Rust TX queue and write to peers
     private val txPollRunnable = object : Runnable {

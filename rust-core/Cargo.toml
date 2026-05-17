@@ -14,8 +14,8 @@ crate-type = ["staticlib", "cdylib"]
 reticulum-rs-transport = { git = "https://github.com/FreeTAKTeam/LXMF-rs.git" }
 
 # Keep embedded FFI for BLE mode (mode 0) and legacy bridge (mode 3)
-rns-embedded-ffi = { git = "https://github.com/FreeTAKTeam/LXMF-rs.git" }
-rns-embedded-core = { git = "https://github.com/FreeTAKTeam/LXMF-rs.git" }
+rns-embedded-ffi = { git = "https://github.com/FreeTAKTeam/LXMF-rs.git", rev = "69a33fcf" }
+rns-embedded-core = { git = "https://github.com/FreeTAKTeam/LXMF-rs.git", rev = "69a33fcf" }
 
 # Async runtime — needed by rns-transport
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "signal", "net", "io-util"] }
