@@ -455,6 +455,9 @@ pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeBeaconRpc(
         Ok(mut mgr) => mgr.queue_rpc(dest, &method_str, params) as jlong,
         Err(_) => -1,
     };
+    if rpc_id >= 0 {
+        node.rpc_notify.notify_one();
+    }
     rpc_id
 }
 
@@ -632,7 +635,7 @@ pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeSetProgramId(
 
 #[no_mangle]
 pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeGetProgramId(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
 ) -> jstring {
     let mut out = [0u8; 64];

@@ -306,8 +306,9 @@ pub(super) async fn handle_data<'a>(
             }
         }
 
-        eprintln!(
-            "[tp] link_data dst={} ctx={:02x} len={}",
+        log::info!(
+            "tp({}): link_data dst={} ctx={:02x} len={}",
+            handler.config.name,
             packet.destination,
             packet.context as u8,
             packet.data.len()

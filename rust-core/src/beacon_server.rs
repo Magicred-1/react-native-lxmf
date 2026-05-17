@@ -50,13 +50,14 @@ pub fn is_rpc_request(data: &[u8]) -> bool {
 
 /// Parse and handle an incoming JSON-RPC request. Returns compressed response bytes.
 ///
-/// On any error (parse failure, signing failure, HTTP error) returns a compressed
-/// JSON-RPC error response so the client always gets a well-formed reply.
+/// `keypair` and `program_id` are optional: proxy methods (`getLatestBlockhash`, etc.)
+/// only require `solana_rpc_url`. `cosignTransaction` and `prepareTransaction` return a
+/// JSON-RPC error if the beacon keypair or program_id are not configured.
 pub async fn handle_rpc_request(
     data: &[u8],
-    keypair: &ed25519_dalek::SigningKey,
+    keypair: Option<&ed25519_dalek::SigningKey>,
     solana_rpc_url: &str,
-    program_id: [u8; 32],
+    program_id: Option<[u8; 32]>,
 ) -> Vec<u8> {
     let raw = match decompress_payload(data) {
         Ok(r) => r,
@@ -69,9 +70,15 @@ pub async fn handle_rpc_request(
 
     let id = req.id;
     match req.method.as_str() {
-        "cosignTransaction"  => cosign_and_submit(id, &req.params, keypair, solana_rpc_url, program_id).await,
-        "prepareTransaction" => prepare_transaction(id, &req.params, keypair, solana_rpc_url, program_id).await,
-        method               => proxy_solana(id, method, req.params, solana_rpc_url).await,
+        "cosignTransaction" => match (keypair, program_id) {
+            (Some(kp), Some(pid)) => cosign_and_submit(id, &req.params, kp, solana_rpc_url, pid).await,
+            _ => error_response(id, -32002, "cosignTransaction requires beacon keypair and program_id"),
+        },
+        "prepareTransaction" => match (keypair, program_id) {
+            (Some(kp), Some(pid)) => prepare_transaction(id, &req.params, kp, solana_rpc_url, pid).await,
+            _ => error_response(id, -32002, "prepareTransaction requires beacon keypair and program_id"),
+        },
+        method => proxy_solana(id, method, req.params, solana_rpc_url).await,
     }
 }
 

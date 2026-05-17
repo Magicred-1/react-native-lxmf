@@ -23,6 +23,26 @@ function shortHex(v: string): string {
   return `${v.slice(0, 6)}…${v.slice(-6)}`;
 }
 
+const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+
+function base58ToHex(s: string): string | null {
+  try {
+    let n = 0n;
+    for (const c of s) {
+      const i = BASE58.indexOf(c);
+      if (i < 0) return null;
+      n = n * 58n + BigInt(i);
+    }
+    return n.toString(16).padStart(64, '0');
+  } catch { return null; }
+}
+
+function normalizeProgramId(v: string): string {
+  const t = v.trim();
+  if (t.length === 64 && /^[0-9a-fA-F]+$/.test(t)) return t;
+  return base58ToHex(t) ?? t;
+}
+
 function generateSeedHex(): string {
   const buf = new Uint8Array(32);
   const cryptoApi = globalThis.crypto ?? (globalThis as Record<string, any>).msCrypto;
@@ -118,7 +138,7 @@ export default function NetworkScreen() {
   useEffect(() => {
     SecureStore.getItemAsync(BEACON_KEYPAIR_KEY).then(v => { if (v) setBeaconKeyHex(v); }).catch(() => {});
     SecureStore.getItemAsync(BEACON_RPC_KEY).then(v => { if (v) setBeaconRpcUrl(v); }).catch(() => {});
-    SecureStore.getItemAsync(BEACON_PROGRAM_ID_KEY).then(v => { if (v) setProgramIdHex(v); }).catch(() => {});
+    SecureStore.getItemAsync(BEACON_PROGRAM_ID_KEY).then(v => { if (v) setProgramIdHex(normalizeProgramId(v)); }).catch(() => {});
   }, []);
 
   // Persist beacon keypair when it changes (only in beacon mode)
@@ -158,10 +178,11 @@ export default function NetworkScreen() {
 
     if (isBeacon) {
       if (beaconKeyHex.length !== 64) { setMsg('Beacon keypair must be 64 hex chars (32-byte seed).'); return; }
-      if (programIdHex.length !== 64) { setMsg('Program ID must be 64 hex chars (32-byte address).'); return; }
+      const normalizedProgramId = normalizeProgramId(programIdHex);
+      if (normalizedProgramId.length !== 64) { setMsg('Program ID must be 64 hex chars or a base58 Solana address.'); return; }
       setBeaconKeypair(beaconKeyHex);
       setBeaconSolanaRpc(beaconRpcUrl.trim());
-      setProgramId(programIdHex.trim());
+      setProgramId(normalizedProgramId);
     }
 
     if (tab === 'ble') {
@@ -265,10 +286,17 @@ export default function NetworkScreen() {
             </View>
             <TextInput
               style={S.input}
-              placeholder="Program ID (64 hex chars)"
+              placeholder="Program ID (hex or base58)"
               placeholderTextColor="#4a6070"
               value={programIdHex}
-              onChangeText={setProgramIdHex}
+              onChangeText={(v) => {
+                const t = v.trim();
+                if ((t.length === 43 || t.length === 44) && /^[1-9A-HJ-NP-Za-km-z]+$/.test(t)) {
+                  const hex = base58ToHex(t);
+                  if (hex) { setProgramIdHex(hex); return; }
+                }
+                setProgramIdHex(t);
+              }}
               autoCapitalize="none"
               autoCorrect={false}
               editable={!isRunning}

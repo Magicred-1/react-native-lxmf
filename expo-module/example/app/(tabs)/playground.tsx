@@ -248,17 +248,6 @@ export default function PlaygroundScreen() {
           placeholderTextColor="#4a6070"
         />
 
-        <Pressable
-          style={({ pressed }) => [
-            S.btn,
-            (noBeacons || rpcLoading) && S.btnDisabled,
-            pressed && S.btnPressed,
-          ]}
-          disabled={noBeacons || rpcLoading}
-          onPress={sendRpc}>
-          <Text style={S.btnText}>{rpcLoading ? '…' : 'Send'}</Text>
-        </Pressable>
-
         {rpcHistory.length > 0 && (
           <View style={S.historyBox}>
             {rpcHistory.map((h, i) => (
@@ -269,6 +258,17 @@ export default function PlaygroundScreen() {
             ))}
           </View>
         )}
+
+        <Pressable
+          style={({ pressed }) => [
+            S.btn,
+            (noBeacons || rpcLoading) && S.btnDisabled,
+            pressed && S.btnPressed,
+          ]}
+          disabled={noBeacons || rpcLoading}
+          onPress={sendRpc}>
+          <Text style={S.btnText}>{rpcLoading ? '…' : 'Send'}</Text>
+        </Pressable>
       </View>
 
       {/* ── Payment Builder ─────────────────────────────────────────────── */}

@@ -473,15 +473,14 @@ impl LxmfNode {
                 match data_rx.recv().await {
                     Ok(received) => {
                         let data = received.data.as_slice().to_vec();
-                        // Source = LXMF sender address (wire bytes 16..32), not the transport destination.
                         let src = if data.len() >= 32 {
                             let mut s = [0u8; 16]; s.copy_from_slice(&data[16..32]); s
                         } else { [0u8; 16] };
-                        info!("LxmfNode: received {} bytes from {}", data.len(), hex::encode(&src));
 
                         // JSON/zlib payload: either a beacon RPC request (beacon mode)
                         // or a beacon RPC response (client mode).
                         if looks_like_rpc_response(&data) {
+                            info!("LxmfNode: received {} bytes of RPC payload", data.len());
                             if is_beacon_mode && crate::beacon_server::is_rpc_request(&data) {
                                 // Beacon mode: handle incoming request and reply on the same link.
                                 let link_id = received.destination.clone();
@@ -489,8 +488,10 @@ impl LxmfNode {
                                     let cfg = beacon_config_rx.lock().unwrap_or_else(|p| p.into_inner());
                                     (cfg.keypair.clone(), cfg.solana_rpc_url.clone(), cfg.program_id)
                                 };
-                                if let (Some(kp), Some(url), Some(pid)) = (keypair, solana_url, program_id) {
-                                    let response = crate::beacon_server::handle_rpc_request(&data, &kp, &url, pid).await;
+                                if let Some(url) = solana_url {
+                                    let response = crate::beacon_server::handle_rpc_request(
+                                        &data, keypair.as_ref(), &url, program_id,
+                                    ).await;
                                     let t = transport_data.lock().await;
                                     if let Some(link) = t.find_in_link(&link_id).await {
                                         let _ = rns_transport::delivery::send_on_link(&t, &link, &response).await;
@@ -498,29 +499,38 @@ impl LxmfNode {
                                         warn!("LxmfNode beacon: no in-link {:?} to send RPC response", link_id);
                                     }
                                 } else {
-                                    warn!("LxmfNode beacon: RPC request received but keypair/solana_url/program_id not set");
+                                    warn!("LxmfNode beacon: RPC request received but solana_rpc_url not set");
                                 }
-                            } else {
-                                // Client mode: correlate as a beacon RPC response.
+                            } else if !crate::beacon_server::is_rpc_request(&data) {
+                                // Client mode: correlate as a beacon RPC response (skip echoed requests).
                                 if let Ok(mut mgr) = beacon_arc_data.lock() {
-                                    if let Some(result) = mgr.on_rpc_bytes(&data) {
-                                        let is_error = result.result.is_err();
-                                        let result_json = match result.result {
-                                            Ok(v)  => v.to_string(),
-                                            Err(e) => serde_json::json!({"code": e.code, "message": e.message}).to_string(),
-                                        };
-                                        if let Ok(mut eq) = events_data.lock() {
-                                            if eq.len() < 1024 {
-                                                eq.push_back(LxmfEvent::RpcResponse {
-                                                    id: result.id, method: result.method, result_json, is_error,
-                                                });
+                                    match mgr.on_rpc_bytes(&data) {
+                                        Some(result) => {
+                                            info!("LxmfNode: RPC id={} {} matched", result.id, result.method);
+                                            let is_error = result.result.is_err();
+                                            let result_json = match result.result {
+                                                Ok(v)  => v.to_string(),
+                                                Err(e) => serde_json::json!({"code": e.code, "message": e.message}).to_string(),
+                                            };
+                                            info!("LxmfNode: RPC result isError={} json={}", is_error, &result_json[..result_json.len().min(120)]);
+                                            if let Ok(mut eq) = events_data.lock() {
+                                                if eq.len() < 1024 {
+                                                    eq.push_back(LxmfEvent::RpcResponse {
+                                                        id: result.id, method: result.method, result_json, is_error,
+                                                    });
+                                                }
                                             }
+                                        }
+                                        None => {
+                                            warn!("LxmfNode: RPC response not matched (no in-flight id)");
                                         }
                                     }
                                 }
                             }
                             continue;
                         }
+
+                        info!("LxmfNode: received {} bytes from {}", data.len(), hex::encode(&src));
 
                         // Fire request_path unconditionally so the sender re-announces
                         // and their identity enters peer_identities. Critical for the
@@ -642,7 +652,7 @@ impl LxmfNode {
                         }
                         continue;
                     };
-                    match send_via_link(&transport, desc, &rpc.payload, std::time::Duration::from_secs(30)).await {
+                    match send_via_link(&transport, desc, &rpc.payload, std::time::Duration::from_secs(25)).await {
                         Ok(_) => info!("LxmfNode: RPC id={} {} sent", rpc.id, rpc.method),
                         Err(e) => {
                             warn!("LxmfNode: RPC id={} {} failed: {}", rpc.id, rpc.method, e);
@@ -852,7 +862,8 @@ impl LxmfNode {
 
         let name_bytes_init = name_bytes.clone();
         let (transport_arc, my_dest, mut data_rx, mut resource_rx, announce_rx, lxmf_addr_hex) = rt.block_on(async move {
-            let config = TransportConfig::new("lxmf-mobile", &private_identity, true);
+            let mut config = TransportConfig::new("lxmf-mobile", &private_identity, true);
+            config.set_retransmit(true);
             let mut transport = Transport::new(config);
 
             {
@@ -1041,19 +1052,21 @@ impl LxmfNode {
                         let src = if data.len() >= 32 {
                             let mut s = [0u8; 16]; s.copy_from_slice(&data[16..32]); s
                         } else { [0u8; 16] };
-                        info!("LxmfNode full: received {} bytes from {}", data.len(), hex::encode(&src));
 
                         // JSON/zlib payload: either a beacon RPC request (beacon mode)
                         // or a beacon RPC response (client mode).
                         if looks_like_rpc_response(&data) {
+                            info!("LxmfNode full: received {} bytes of RPC payload", data.len());
                             if is_beacon_mode && crate::beacon_server::is_rpc_request(&data) {
                                 let link_id = received.destination.clone();
                                 let (keypair, solana_url, program_id) = {
                                     let cfg = beacon_config_rx.lock().unwrap_or_else(|p| p.into_inner());
                                     (cfg.keypair.clone(), cfg.solana_rpc_url.clone(), cfg.program_id)
                                 };
-                                if let (Some(kp), Some(url), Some(pid)) = (keypair, solana_url, program_id) {
-                                    let response = crate::beacon_server::handle_rpc_request(&data, &kp, &url, pid).await;
+                                if let Some(url) = solana_url {
+                                    let response = crate::beacon_server::handle_rpc_request(
+                                        &data, keypair.as_ref(), &url, program_id,
+                                    ).await;
                                     let t = transport_data.lock().await;
                                     if let Some(link) = t.find_in_link(&link_id).await {
                                         let _ = rns_transport::delivery::send_on_link(&t, &link, &response).await;
@@ -1061,28 +1074,37 @@ impl LxmfNode {
                                         warn!("LxmfNode full beacon: no in-link {:?} to send RPC response", link_id);
                                     }
                                 } else {
-                                    warn!("LxmfNode full beacon: RPC request received but keypair/solana_url/program_id not set");
+                                    warn!("LxmfNode full beacon: RPC request received but solana_rpc_url not set");
                                 }
-                            } else {
+                            } else if !crate::beacon_server::is_rpc_request(&data) {
                                 if let Ok(mut mgr) = beacon_arc_data.lock() {
-                                    if let Some(result) = mgr.on_rpc_bytes(&data) {
-                                        let is_error = result.result.is_err();
-                                        let result_json = match result.result {
-                                            Ok(v)  => v.to_string(),
-                                            Err(e) => serde_json::json!({"code": e.code, "message": e.message}).to_string(),
-                                        };
-                                        if let Ok(mut eq) = events_data.lock() {
-                                            if eq.len() < 1024 {
-                                                eq.push_back(LxmfEvent::RpcResponse {
-                                                    id: result.id, method: result.method, result_json, is_error,
-                                                });
+                                    match mgr.on_rpc_bytes(&data) {
+                                        Some(result) => {
+                                            info!("LxmfNode full: RPC id={} {} matched", result.id, result.method);
+                                            let is_error = result.result.is_err();
+                                            let result_json = match result.result {
+                                                Ok(v)  => v.to_string(),
+                                                Err(e) => serde_json::json!({"code": e.code, "message": e.message}).to_string(),
+                                            };
+                                            info!("LxmfNode full: RPC result isError={} json={}", is_error, &result_json[..result_json.len().min(120)]);
+                                            if let Ok(mut eq) = events_data.lock() {
+                                                if eq.len() < 1024 {
+                                                    eq.push_back(LxmfEvent::RpcResponse {
+                                                        id: result.id, method: result.method, result_json, is_error,
+                                                    });
+                                                }
                                             }
+                                        }
+                                        None => {
+                                            warn!("LxmfNode full: RPC response not matched (no in-flight id)");
                                         }
                                     }
                                 }
                             }
                             continue;
                         }
+
+                        info!("LxmfNode full: received {} bytes from {}", data.len(), hex::encode(&src));
 
                         if src != [0u8; 16] {
                             let t = Arc::clone(&transport_data);
@@ -1194,7 +1216,7 @@ impl LxmfNode {
                         }
                         continue;
                     };
-                    match send_via_link(&transport, desc, &rpc.payload, std::time::Duration::from_secs(30)).await {
+                    match send_via_link(&transport, desc, &rpc.payload, std::time::Duration::from_secs(25)).await {
                         Ok(_) => info!("LxmfNode full: RPC id={} {} sent", rpc.id, rpc.method),
                         Err(e) => {
                             warn!("LxmfNode full: RPC id={} {} failed: {}", rpc.id, rpc.method, e);
@@ -1924,13 +1946,14 @@ impl LxmfNode {
                         let src = if data.len() >= 32 {
                             let mut s = [0u8; 16]; s.copy_from_slice(&data[16..32]); s
                         } else { [0u8; 16] };
-                        info!("LxmfNode BLE: received {} bytes from {}", data.len(), hex::encode(&src));
 
                         // Beacon RPC responses are JSON or zlib-compressed, not LXMF-framed.
                         if looks_like_rpc_response(&data) {
                             // BLE-only mode has no RPC dispatch task — silently discard.
                             continue;
                         }
+
+                        info!("LxmfNode BLE: received {} bytes from {}", data.len(), hex::encode(&src));
 
                         if data.len() >= 32 {
                             let sender_hash = src;

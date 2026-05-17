@@ -447,31 +447,55 @@ export function useLxmf(options: UseLxmfOptions = {}) {
   /**
    * Call a specific beacon by destHash and await the response.
    * Resolves when the matching `onRpcResponse` event arrives, rejects on timeout.
+   *
+   * Listener is registered BEFORE beaconRpc() is called to eliminate the race where
+   * a fast beacon responds before the JS event loop resumes after the await.
+   * Events arriving before the id is known are buffered and replayed once id is set.
    */
-  const beaconRpcWait = useCallback(async (
+  const beaconRpcWait = useCallback((
     destHashHex: string,
     method: string,
     params?: unknown,
     timeoutMs = 30_000,
   ): Promise<{ resultJson: string; isError: boolean }> => {
     const paramsJson = params === undefined ? null : JSON.stringify(params);
-    const id = await LxmfModule.beaconRpc(destHashHex, method, paramsJson);
-    if (id < 0) throw new Error(`beaconRpc(${method}): send failed`);
 
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        sub?.remove();
-        reject(new Error(`beaconRpc(${method}) timed out after ${timeoutMs}ms`));
-      }, timeoutMs);
+      let id: number | undefined;
+      let settled = false;
+      const buffered: any[] = [];
 
-      const sub = (LxmfModuleNative as any)?.addListener('onRpcResponse', (event: any) => {
-        if (event.id !== id) return;
+      const settle = (event: any) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
         sub?.remove();
         resolve({ resultJson: event.resultJson, isError: event.isError });
+      };
+
+      const sub = (LxmfModuleNative as any)?.addListener('onRpcResponse', (event: any) => {
+        if (id === undefined) { buffered.push(event); return; }
+        if (event.id === id) settle(event);
       });
 
-      if (sub == null) { clearTimeout(timer); reject(new Error('Native module unavailable')); }
+      if (sub == null) { reject(new Error('Native module unavailable')); return; }
+
+      const timer = setTimeout(() => {
+        sub.remove();
+        reject(new Error(`beaconRpc(${method}) timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      LxmfModule.beaconRpc(destHashHex, method, paramsJson).then(rpcId => {
+        if (rpcId < 0) {
+          clearTimeout(timer); sub.remove();
+          reject(new Error(`beaconRpc(${method}): send failed`));
+          return;
+        }
+        id = rpcId;
+        for (const evt of buffered) {
+          if (evt.id === id) { settle(evt); return; }
+        }
+      }).catch(e => { clearTimeout(timer); sub.remove(); reject(e); });
     });
   }, []);
 

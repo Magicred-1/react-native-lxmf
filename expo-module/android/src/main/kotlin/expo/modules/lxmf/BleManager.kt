@@ -8,8 +8,8 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelUuid
 import android.util.Log
-import java.util.Collections
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 private const val TAG = "LxmfBle"
 
@@ -44,11 +44,11 @@ class BleManager(
     private val mainHandler = Handler(Looper.getMainLooper())
 
     // Active GATT connections keyed by MAC address string
-    private val connections: MutableMap<String, BluetoothGatt> = Collections.synchronizedMap(mutableMapOf())
+    private val connections = ConcurrentHashMap<String, BluetoothGatt>()
     // MACs we are currently trying to connect (avoid duplicate attempts)
-    private val connecting: MutableSet<String> = Collections.synchronizedSet(mutableSetOf())
+    private val connecting: MutableSet<String> = ConcurrentHashMap.newKeySet()
     // Timestamp (ms) when each MAC last disconnected — enforces reconnect cooldown
-    private val disconnectedAt: MutableMap<String, Long> = Collections.synchronizedMap(mutableMapOf())
+    private val disconnectedAt = ConcurrentHashMap<String, Long>()
 
     private var scanner: BluetoothLeScanner? = null
     private var advertiser: BluetoothLeAdvertiser? = null
@@ -62,9 +62,9 @@ class BleManager(
     private var serverTxChar: BluetoothGattCharacteristic? = null
     // Centrals that have enabled CCC notifications on our TX char, keyed by MAC.
     // Only these are "registered as peers" with Rust (mirrors iOS subscribedCentrals).
-    private val serverSubscribers: MutableMap<String, BluetoothDevice> = Collections.synchronizedMap(mutableMapOf())
+    private val serverSubscribers = ConcurrentHashMap<String, BluetoothDevice>()
     // Buffer for ATT Long Write (preparedWrite=true) fragments from remote centrals.
-    private val preparedWriteBuffer: MutableMap<String, java.io.ByteArrayOutputStream> = Collections.synchronizedMap(mutableMapOf())
+    private val preparedWriteBuffer = ConcurrentHashMap<String, java.io.ByteArrayOutputStream>()
 
     private var txEmptyPollCount = 0
     private var currentTxPollIntervalMs = TX_POLL_INTERVAL_MS
@@ -124,10 +124,20 @@ class BleManager(
         stopAdvertising()
         closeGattServer()
         mainHandler.removeCallbacks(txPollRunnable)
-        connections.values.forEach { it.disconnect(); it.close() }
+        // Snapshot then clear before disconnecting. The GATT STATE_DISCONNECTED
+        // callback fires asynchronously; clearing first makes the re-entrant guard
+        // `if (mac !in connections && mac !in connecting) return` short-circuit
+        // cleanly instead of racing with iteration. nativeBleDisconnected is called
+        // explicitly here for client-role peers (server-role handled in closeGattServer).
+        val clientEntries = ArrayList(connections.entries)
         connections.clear()
         connecting.clear()
         disconnectedAt.clear()
+        clientEntries.forEach { (mac, gatt) ->
+            module.nativeBleDisconnected(macToBytes(mac))
+            gatt.disconnect()
+            gatt.close()
+        }
         Log.i(TAG, "BleManager stopped")
     }
 
@@ -214,11 +224,12 @@ class BleManager(
     }
 
     private fun closeGattServer() {
-        // Notify Rust that all subscribed centrals are gone.
-        for ((mac, _) in serverSubscribers) {
-            module.nativeBleDisconnected(macToBytes(mac))
-        }
+        // Snapshot keys before clearing — ConcurrentHashMap iteration is safe but
+        // we want nativeBleDisconnected calls to happen after clear so re-entrant
+        // GATT server callbacks don't observe stale subscriber state.
+        val macs = ArrayList(serverSubscribers.keys)
         serverSubscribers.clear()
+        macs.forEach { mac -> module.nativeBleDisconnected(macToBytes(mac)) }
         gattServer?.close()
         gattServer = null
         serverTxChar = null
@@ -407,9 +418,10 @@ class BleManager(
 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
+            if (!isRunning) return
             val device = result.device ?: return
             val mac = device.address ?: return
-            if (mac in connections || mac in connecting) return
+            if (connections.containsKey(mac) || connecting.contains(mac)) return
             val lastDisconnect = disconnectedAt[mac] ?: 0L
             if (System.currentTimeMillis() - lastDisconnect < RECONNECT_COOLDOWN_MS) return
             Log.i(TAG, "BLE: found peer $mac, connecting")
@@ -431,6 +443,14 @@ class BleManager(
             val mac = gatt.device.address
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
+                    if (!isRunning) {
+                        // Connection completed after stop() — discard immediately to
+                        // prevent stale entries blocking the next scan cycle.
+                        connecting.remove(mac)
+                        gatt.disconnect()
+                        gatt.close()
+                        return
+                    }
                     Log.i(TAG, "BLE GATT connected: $mac")
                     connections[mac] = gatt
                     connecting.remove(mac)
@@ -438,7 +458,7 @@ class BleManager(
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     // Guard against double-fire (Android BLE can call this twice)
-                    if (mac !in connections && mac !in connecting) return
+                    if (!connections.containsKey(mac) && !connecting.contains(mac)) return
                     Log.i(TAG, "BLE GATT disconnected: $mac (status=$status)")
                     connections.remove(mac)
                     connecting.remove(mac)
@@ -478,10 +498,17 @@ class BleManager(
             val peerTxChar = service.getCharacteristic(RNS_TX_CHAR_UUID) ?: return
             gatt.setCharacteristicNotification(peerTxChar, true)
             val cccd = peerTxChar.getDescriptor(CCCD_UUID) ?: return
-            @Suppress("DEPRECATION")
-            cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-            @Suppress("DEPRECATION")
-            gatt.writeDescriptor(cccd)
+            // API 33+: single-call form is required — the deprecated set-then-write
+            // path silently fails on some Android 13+ devices, leaving CCCD unset
+            // and nativeBleConnected never fires.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gatt.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+            } else {
+                @Suppress("DEPRECATION")
+                cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                @Suppress("DEPRECATION")
+                gatt.writeDescriptor(cccd)
+            }
         }
 
         override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {

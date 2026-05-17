@@ -518,7 +518,6 @@ impl Link {
                         log::debug!("link({}): has been proved", self.id);
 
                         self.handshake(identity);
-                        self.ingress_iface.get_or_insert(iface);
 
                         self.status = LinkStatus::Active;
                         self.rtt = self.request_time.elapsed();
