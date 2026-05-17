@@ -23,6 +23,17 @@ function shortHex(v: string): string {
   return `${v.slice(0, 6)}…${v.slice(-6)}`;
 }
 
+function generateSeedHex(): string {
+  const buf = new Uint8Array(32);
+  const cryptoApi = globalThis.crypto ?? (globalThis as Record<string, any>).msCrypto;
+  if (cryptoApi?.getRandomValues) {
+    cryptoApi.getRandomValues(buf);
+  } else {
+    for (let i = 0; i < buf.length; i++) buf[i] = Math.trunc(Math.random() * 256);
+  }
+  return Array.from(buf, b => b.toString(16).padStart(2, '0')).join('');
+}
+
 type TransportTab = 'ble' | 'tcp' | 'both';
 
 // ── Stat row ──────────────────────────────────────────────────────────────────
@@ -233,17 +244,25 @@ export default function NetworkScreen() {
         {/* Beacon server config — shown only when beacon mode is on */}
         {isBeacon && (
           <>
-            <TextInput
-              style={S.input}
-              placeholder="Beacon keypair (64 hex chars)"
-              placeholderTextColor="#4a6070"
-              value={beaconKeyHex}
-              onChangeText={setBeaconKeyHex}
-              autoCapitalize="none"
-              autoCorrect={false}
-              secureTextEntry
-              editable={!isRunning}
-            />
+            <View style={S.inputRow}>
+              <TextInput
+                style={[S.input, { flex: 1 }]}
+                placeholder="Beacon keypair (64 hex chars)"
+                placeholderTextColor="#4a6070"
+                value={beaconKeyHex}
+                onChangeText={setBeaconKeyHex}
+                autoCapitalize="none"
+                autoCorrect={false}
+                secureTextEntry
+                editable={!isRunning}
+              />
+              <Pressable
+                style={({ pressed }) => [S.genBtn, isRunning && S.btnDisabled, pressed && S.btnPressed]}
+                disabled={isRunning}
+                onPress={() => setBeaconKeyHex(generateSeedHex())}>
+                <Text style={S.genBtnText}>Generate</Text>
+              </Pressable>
+            </View>
             <TextInput
               style={S.input}
               placeholder="Program ID (64 hex chars)"
@@ -584,4 +603,8 @@ const S = StyleSheet.create({
 
   fieldLabel: { color: '#7a9db5', fontSize: 11, marginBottom: -4 },
   textArea: { minHeight: 80, textAlignVertical: 'top' },
+
+  inputRow: { flexDirection: 'row', gap: 8, alignItems: 'center' },
+  genBtn: { paddingHorizontal: 12, paddingVertical: 10, borderRadius: 10, backgroundColor: '#0d3550', borderWidth: 1, borderColor: '#1a7fc1' },
+  genBtnText: { color: '#4fb3e8', fontSize: 13, fontWeight: '600' },
 });
