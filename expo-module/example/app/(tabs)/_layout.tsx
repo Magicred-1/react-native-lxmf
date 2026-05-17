@@ -10,6 +10,7 @@ const DIM = '#4a6070';
 const iconConversations = ({ color }: { color: string }) => <IconSymbol size={26} name="message.fill" color={color} />;
 const iconNetwork       = ({ color }: { color: string }) => <IconSymbol size={26} name="wifi" color={color} />;
 const iconSettings      = ({ color }: { color: string }) => <IconSymbol size={26} name="gearshape.fill" color={color} />;
+const iconPlayground    = ({ color }: { color: string }) => <IconSymbol size={26} name="hammer.fill" color={color} />;
 
 export default function TabLayout() {
   return (
@@ -39,6 +40,10 @@ export default function TabLayout() {
       <Tabs.Screen
         name="settings"
         options={{ title: 'Settings', tabBarIcon: iconSettings }}
+      />
+      <Tabs.Screen
+        name="playground"
+        options={{ title: 'Playground', tabBarIcon: iconPlayground }}
       />
     </Tabs>
   );

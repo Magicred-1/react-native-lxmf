@@ -21,6 +21,7 @@ const MAPPING = {
   'message.fill': 'chat',
   'wifi': 'wifi',
   'gearshape.fill': 'settings',
+  'hammer.fill': 'build',
 } as IconMapping;
 
 /**
