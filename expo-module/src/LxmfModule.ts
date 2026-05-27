@@ -65,6 +65,9 @@ export type NativeModuleType = {
   // RNode pairing — NUS/KISS BLE path
   getNusUnpairedRNodes(): string;
   pairNusRNode(mac: string): boolean;
+  connectedRNodeCount(): number;
+  getConnectedRNodes(): string;  // JSON [{id, name, rssi?}]
+  unpairNusRNode(id: string): boolean;
 
   // Group chat — Reticulum GROUP destination (shared AES key)
   createGroup(name: string, keyHex: string): string;
@@ -111,6 +114,9 @@ const missingNativeShim: NativeModuleType = {
   setBeaconSolanaRpc: () => throwMissingNative(),
   getNusUnpairedRNodes: () => throwMissingNative(),
   pairNusRNode: () => throwMissingNative(),
+  connectedRNodeCount: () => throwMissingNative(),
+  getConnectedRNodes: () => throwMissingNative(),
+  unpairNusRNode: () => throwMissingNative(),
   createGroup: () => throwMissingNative(),
   joinGroup: () => throwMissingNative(),
   leaveGroup: () => throwMissingNative(),

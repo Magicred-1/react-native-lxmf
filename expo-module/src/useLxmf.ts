@@ -68,7 +68,7 @@ export interface RpcResponseEvent {
 }
 
 export interface LxmfEvent {
-  type: 'statusChanged' | 'packetReceived' | 'txReceived' | 'beaconDiscovered' | 'messageReceived' | 'announceReceived' | 'messageQueued' | 'messageDelivered' | 'messageFailed' | 'log' | 'error' | 'rpcResponse';
+  type: 'statusChanged' | 'packetReceived' | 'txReceived' | 'beaconDiscovered' | 'messageReceived' | 'announceReceived' | 'messageQueued' | 'messageDelivered' | 'messageFailed' | 'log' | 'error' | 'rpcResponse' | 'rnodeConnected' | 'rnodeDisconnected';
   [key: string]: any;
 }
 
@@ -233,6 +233,12 @@ export function useLxmf(options: UseLxmfOptions = {}) {
       mod.addListener('onMessageFailed', (event: Record<string, any>) => {
         pushEvent('messageFailed', event);
         setError(`Message ${String(event.seq)} failed: ${String(event.reason ?? 'unknown')}`);
+      }),
+      mod.addListener('onRNodeConnected', (event: Record<string, any>) => {
+        pushEvent('rnodeConnected', event);
+      }),
+      mod.addListener('onRNodeDisconnected', (event: Record<string, any>) => {
+        pushEvent('rnodeDisconnected', event);
       }),
     ];
 
@@ -423,6 +429,22 @@ export function useLxmf(options: UseLxmfOptions = {}) {
    */
   const pairNusRNode = useCallback((mac: string): boolean => {
     return LxmfModule.pairNusRNode(mac);
+  }, []);
+
+  const connectedRNodeCount = useCallback(() => {
+    return LxmfModule.connectedRNodeCount();
+  }, []);
+
+  const getConnectedRNodes = useCallback((): { id: string; name: string; rssi?: number }[] => {
+    try {
+      return parseJson<{ id: string; name: string; rssi?: number }[]>(
+        LxmfModule.getConnectedRNodes(), []
+      );
+    } catch { return []; }
+  }, []);
+
+  const unpairNusRNode = useCallback((id: string): boolean => {
+    return LxmfModule.unpairNusRNode(id);
   }, []);
 
   /**
@@ -686,6 +708,9 @@ export function useLxmf(options: UseLxmfOptions = {}) {
     bleUnpairedRNodeCount,
     getNusUnpairedRNodes,
     pairNusRNode,
+    connectedRNodeCount,
+    getConnectedRNodes,
+    unpairNusRNode,
     beaconRpc,
     beaconRpcWait,
     beaconBroadcastRpc,

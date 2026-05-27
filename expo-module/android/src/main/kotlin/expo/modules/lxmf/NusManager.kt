@@ -131,6 +131,35 @@ class NusManager(
         return arr.toString()
     }
 
+    /** JSON array of connected RNodes: [{"id":"AA:BB:...","name":"RNode_1234","rssi":null},...] */
+    fun getConnectedRNodesJson(): String {
+        val arr = JSONArray()
+        connections.keys.forEach { mac ->
+            arr.put(JSONObject().apply {
+                put("id", mac)
+                put("name", try { adapter?.getRemoteDevice(mac)?.name ?: "" } catch (_: Exception) { "" })
+                put("rssi", JSONObject.NULL)
+            })
+        }
+        return arr.toString()
+    }
+
+    /**
+     * Disconnect and un-bond an RNode by MAC. The OS-level bond is removed via reflection
+     * so the device won't auto-reconnect on the next scan.
+     */
+    fun unpairRNode(id: String): Boolean {
+        val gatt = connections[id] ?: return false
+        try {
+            val m = gatt.device.javaClass.getMethod("removeBond")
+            m.invoke(gatt.device)
+        } catch (e: Exception) {
+            Log.w(NUS_TAG, "removeBond: ${e.message}")
+        }
+        gatt.disconnect()
+        return true
+    }
+
     /**
      * Initiate OS pairing with an unpaired RNode. Shows system Bluetooth pairing dialog.
      * Returns true if bond initiation succeeded (or device is already bonded and connecting).
@@ -270,6 +299,7 @@ class NusManager(
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     if (mac !in connections && mac !in connecting) return
                     Log.i(NUS_TAG, "NUS GATT disconnected: $mac (status=$status)")
+                    module.sendEvent("onRNodeDisconnected", mapOf("id" to mac))
                     connections.remove(mac)
                     txChars.remove(mac)
                     writeMtu.remove(mac)
@@ -338,6 +368,8 @@ class NusManager(
             if (descriptor.uuid == CCCD_UUID) {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
                     Log.i(NUS_TAG, "NUS RX notifications enabled: $mac — RNode ready")
+                    val name = try { gatt.device.name ?: "" } catch (_: Exception) { "" }
+                    module.sendEvent("onRNodeConnected", mapOf("id" to mac, "name" to name))
                 } else {
                     Log.e(NUS_TAG, "NUS CCCD write failed ($status) on $mac — RX notifications NOT enabled, disconnecting")
                     gatt.disconnect()

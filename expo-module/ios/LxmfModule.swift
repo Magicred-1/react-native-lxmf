@@ -229,6 +229,12 @@ public class LxmfModule: Module {
     private lazy var bleManager: BLEManager = {
         let mgr = BLEManager()
         mgr.onReadyToSend = { [weak self] in DispatchQueue.main.async { self?.drainOutgoing() } }
+        mgr.onRNodeConnected = { [weak self] (id, name) in
+            DispatchQueue.main.async { self?.sendEvent("onRNodeConnected", ["id": id, "name": name]) }
+        }
+        mgr.onRNodeDisconnected = { [weak self] (id) in
+            DispatchQueue.main.async { self?.sendEvent("onRNodeDisconnected", ["id": id]) }
+        }
         return mgr
     }()
 
@@ -249,7 +255,9 @@ public class LxmfModule: Module {
             "onMessageFailed",
             "onLog",
             "onError",
-            "onOutgoingPacket"
+            "onOutgoingPacket",
+            "onRNodeConnected",
+            "onRNodeDisconnected"
         )
 
         // --- Lifecycle ---
@@ -453,6 +461,18 @@ public class LxmfModule: Module {
         // The identifier is a CoreBluetooth UUID string, not a MAC (iOS hides MACs since iOS 13).
         Function("pairNusRNode") { (identifier: String) -> Bool in
             return self.bleManager.connectRNode(identifier)
+        }
+
+        Function("connectedRNodeCount") { () -> Int in
+            return self.bleManager.connectedRNodeCount()
+        }
+
+        Function("getConnectedRNodes") { () -> String in
+            return self.bleManager.getConnectedRNodesJson()
+        }
+
+        Function("unpairNusRNode") { (identifier: String) -> Bool in
+            return self.bleManager.disconnectRNode(identifier)
         }
 
         // --- Solana tx building ---

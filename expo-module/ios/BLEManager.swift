@@ -64,6 +64,9 @@ class BLEManager: NSObject {
     /// LxmfModule sets this to re-trigger drainOutgoing() without a timer.
     var onReadyToSend: (() -> Void)?
 
+    var onRNodeConnected: ((String, String) -> Void)?
+    var onRNodeDisconnected: ((String) -> Void)?
+
     /// Per-launch random token embedded in our advertisement's local name, so
     /// our central role can detect and skip our own peripheral advertisement
     /// (CoreBluetooth does not auto-filter self when running both roles).
@@ -260,6 +263,32 @@ class BLEManager: NSObject {
         return !nusPeripherals.isEmpty
     }
 
+    func connectedRNodeCount() -> Int { return nusPeripherals.count }
+
+    func getConnectedRNodesJson() -> String {
+        var entries: [[String: Any]] = []
+        for (_, peripheral) in nusPeripherals {
+            entries.append([
+                "id": peripheral.identifier.uuidString,
+                "name": peripheral.name ?? "",
+            ])
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: entries),
+              let str = String(data: data, encoding: .utf8) else { return "[]" }
+        return str
+    }
+
+    func disconnectRNode(_ identifierString: String) -> Bool {
+        guard let uuid = UUID(uuidString: identifierString),
+              let peripheral = nusPeripherals[uuid] else { return false }
+        bondedPeripherals.remove(uuid)
+        saveBondedPeripherals()
+        centralManager?.cancelPeripheralConnection(peripheral)
+        nusPeripherals.removeValue(forKey: uuid)
+        nusTxChars.removeValue(forKey: uuid)
+        return true
+    }
+
     /// JSON array of discovered-but-not-yet-bonded RNodes.
     /// Uses CoreBluetooth UUID as "mac" (iOS hides real MACs since iOS 13).
     func unpairedRNodesJson() -> String {
@@ -406,6 +435,7 @@ extension BLEManager: CBCentralManagerDelegate {
 
         if isNus {
             // RNode NUS disconnect
+            onRNodeDisconnected?(peripheral.identifier.uuidString)
             nusPeripherals.removeValue(forKey: peripheral.identifier)
             nusTxChars.removeValue(forKey: peripheral.identifier)
         } else {
@@ -478,6 +508,7 @@ extension BLEManager: CBPeripheralDelegate {
                     peripheral.setNotifyValue(true, for: char)
                 }
             }
+            onRNodeConnected?(peripheral.identifier.uuidString, peripheral.name ?? "")
             return
         }
 

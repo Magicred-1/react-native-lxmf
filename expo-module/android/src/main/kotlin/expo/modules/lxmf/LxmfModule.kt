@@ -50,7 +50,9 @@ class LxmfModule : Module() {
       "onMessageFailed",
       "onLog",
       "onError",
-      "onOutgoingPacket"
+      "onOutgoingPacket",
+      "onRNodeConnected",
+      "onRNodeDisconnected"
     )
 
     OnCreate {
@@ -185,6 +187,18 @@ class LxmfModule : Module() {
 
     Function("pairNusRNode") { mac: String ->
       nusManager?.pairRNode(mac) ?: false
+    }
+
+    Function("connectedRNodeCount") {
+      nusManager?.connectedRNodeCount() ?: 0
+    }
+
+    Function("getConnectedRNodes") {
+      nusManager?.getConnectedRNodesJson() ?: "[]"
+    }
+
+    Function("unpairNusRNode") { id: String ->
+      nusManager?.unpairRNode(id) ?: false
     }
 
     // --- Solana tx building ---
