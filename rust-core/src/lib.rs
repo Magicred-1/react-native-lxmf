@@ -3,7 +3,8 @@
 //! Architecture:
 //!   TypeScript (useLxmf hook) → Expo Modules (Kotlin) → JNI → this crate → rns-transport
 //!
-//! Mode 0: BLE mesh via rns-embedded-ffi
+//! Mode 0: BLE mesh — phone↔phone via BleInterface (HDLC), RNode radio via NusInterface (KISS),
+//!           embedded-stack RNodes via EmbeddedInterface (rns-embedded-runtime)
 //! Mode 3: Standard Reticulum TCP via rns-transport (full protocol, real identity, announces)
 
 pub mod node;
@@ -13,6 +14,7 @@ pub mod solana_tx;
 pub mod group;
 pub mod ble_iface;
 pub mod nus_iface;
+pub mod embedded_iface;
 pub mod ffi;
 pub mod framing;
 pub mod log_bridge;

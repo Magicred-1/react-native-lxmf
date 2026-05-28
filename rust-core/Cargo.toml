@@ -13,9 +13,9 @@ crate-type = ["staticlib", "cdylib"]
 # Full Reticulum protocol stack — real identity, announces, routing, links
 reticulum-rs-transport = { git = "https://github.com/FreeTAKTeam/LXMF-rs.git" }
 
-# Keep embedded FFI for BLE mode (mode 0) and legacy bridge (mode 3)
-rns-embedded-ffi = { git = "https://github.com/FreeTAKTeam/LXMF-rs.git", rev = "69a33fcf" }
-rns-embedded-core = { git = "https://github.com/FreeTAKTeam/LXMF-rs.git", rev = "69a33fcf" }
+# Embedded device runtime — BleShimTransport + EmbeddedNodeRuntime for RNodes with embedded Reticulum stack
+rns-embedded-runtime = { git = "https://github.com/FreeTAKTeam/LXMF-rs.git" }
+rns-embedded-core = { git = "https://github.com/FreeTAKTeam/LXMF-rs.git" }
 
 # Async runtime — needed by rns-transport
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "signal", "net", "io-util"] }
@@ -31,7 +31,7 @@ serde_json = "1"
 log = "0.4"
 
 # SQLite for message persistence
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 # Hex encoding
 hex = "0.4"
@@ -61,8 +61,6 @@ bs58 = "0.5"
 jni = { version = "0.21", default-features = false }
 android_logger = "0.13"
 
-[patch."https://github.com/FreeTAKTeam/LXMF-rs.git"]
-reticulum-rs-transport = { path = "patches/rns-transport" }
 
 [profile.release]
 opt-level = 3

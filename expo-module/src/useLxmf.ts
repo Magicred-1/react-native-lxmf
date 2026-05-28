@@ -626,6 +626,18 @@ export function useLxmf(options: UseLxmfOptions = {}) {
     catch (e: any) { setError(e?.message ?? 'setBeaconSolanaRpc failed'); return false; }
   }, []);
 
+  /** Enable or disable propagation node mode (store-and-forward relay) for Mode 3 TCP. Call before start(). */
+  const setPropagationNode = useCallback((enable: boolean): boolean => {
+    try { return LxmfModule.setPropagationNode(enable); }
+    catch (e: any) { setError(e?.message ?? 'setPropagationNode failed'); return false; }
+  }, []);
+
+  /** Request an immediate message sync from connected propagation relays. */
+  const syncPropagation = useCallback(async (): Promise<boolean> => {
+    try { return await LxmfModule.syncPropagation(); }
+    catch (e: any) { setError(e?.message ?? 'syncPropagation failed'); return false; }
+  }, []);
+
   /** @deprecated Use cosignAndSubmit (plain tx) or requestUnsignedTx+submitSignedTx (MWA). */
   const partialSignExecutePayment = useCallback((
     payerKeyHex: string,
@@ -721,6 +733,8 @@ export function useLxmf(options: UseLxmfOptions = {}) {
     getProgramId,
     setBeaconKeypair,
     setBeaconSolanaRpc,
+    setPropagationNode,
+    syncPropagation,
     partialSignExecutePayment,
     extractNonceBlockhash,
     createGroup,

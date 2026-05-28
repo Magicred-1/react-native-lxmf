@@ -124,6 +124,8 @@ pub struct LxmfNode {
     pub is_beacon: bool,
     /// Beacon Solana signing keypair and RPC URL. Arc so FFI can update after init.
     pub beacon_config: Arc<std::sync::Mutex<crate::beacon_server::BeaconConfig>>,
+    /// When true, Mode 3 transport retransmits announces (propagation node / store-and-forward relay).
+    pub propagation_node: bool,
 }
 
 // Access through Mutex
@@ -166,6 +168,7 @@ impl LxmfNode {
             rpc_notify: Arc::new(tokio::sync::Notify::new()),
             is_beacon: false,
             beacon_config: Arc::new(std::sync::Mutex::new(crate::beacon_server::BeaconConfig::default())),
+            propagation_node: false,
         };
 
         // Clear stale BLE peer list from any previous session in this process
@@ -208,7 +211,7 @@ impl LxmfNode {
                 let interfaces = parse_interfaces_json(interfaces_json)?;
                 Self::start_reticulum(identity_hex, &interfaces, announce_interval_ms, display_name, is_beacon)
             }
-            0 => Self::start_ble(identity_hex, address_hex, display_name, is_beacon),
+            0 => Self::start_ble(identity_hex, address_hex, announce_interval_ms, display_name, is_beacon),
             4 => {
                 let interfaces = parse_interfaces_json(interfaces_json)?;
                 Self::start_full(identity_hex, &interfaces, announce_interval_ms, display_name, is_beacon)
@@ -264,10 +267,19 @@ impl LxmfNode {
 
         let name_bytes: Vec<u8> = build_app_data(display_name, is_beacon);
 
+        // Read propagation flag before entering async block
+        let propagation_node = {
+            let g = Self::global().lock().map_err(|e| e.to_string())?;
+            g.as_ref().ok_or("Node not initialized")?.propagation_node
+        };
+
         // Set up transport synchronously so we can store the handle
         let name_bytes_init = name_bytes.clone();
         let (transport_arc, my_dest, mut data_rx, mut resource_rx, announce_rx, lxmf_addr_hex) = rt.block_on(async move {
-            let config = TransportConfig::new("lxmf-mobile", &private_identity, true);
+            let mut config = TransportConfig::new("lxmf-mobile", &private_identity, true);
+            if propagation_node {
+                config.set_retransmit(true);
+            }
             let mut transport = Transport::new(config);
 
             // Add all TCP interfaces
@@ -1262,15 +1274,18 @@ impl LxmfNode {
             }
         }));
 
-        // BLE initial post-connect (5s) + steady 300s re-announce
+        // BLE initial post-connect (5s) + steady re-announce at configured interval
         let transport_ble = Arc::clone(&transport_arc);
         let name_bytes_ble = name_bytes.clone();
+        let ble_interval = tokio::time::Duration::from_millis(
+            if announce_interval_ms > 0 { announce_interval_ms } else { 300_000 }
+        );
         task_handles.push(rt.spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             info!("LxmfNode full: BLE initial post-connect re-announce");
             transport_ble.lock().await.send_announce(&my_dest, Some(name_bytes_ble.as_slice())).await;
             loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
+                tokio::time::sleep(ble_interval).await;
                 info!("LxmfNode full: BLE periodic re-announce");
                 transport_ble.lock().await.send_announce(&my_dest, Some(name_bytes_ble.as_slice())).await;
             }
@@ -1735,7 +1750,7 @@ impl LxmfNode {
     /// The Kotlin BleManager must be started separately (it owns hardware access).
     /// Call `nativeBleConnected` / `nativeBleDisconnected` / `nativeBleReceive` from Kotlin
     /// as BLE peers connect and send data.
-    fn start_ble(identity_hex: &str, _address_hex: &str, display_name: &str, is_beacon: bool) -> Result<(), String> {
+    fn start_ble(identity_hex: &str, _address_hex: &str, announce_interval_ms: u64, display_name: &str, is_beacon: bool) -> Result<(), String> {
         use rns_transport::identity::PrivateIdentity;
         use rns_transport::transport::TransportConfig;
         use rns_transport::destination::DestinationName;
@@ -2075,9 +2090,9 @@ impl LxmfNode {
                 .send_announce(&dest_reannounce, Some(name_bytes_reann.as_slice()))
                 .await;
 
-            // Steady-state loop — same 5min default as TCP mode.
+            let interval = tokio::time::Duration::from_millis(announce_interval_ms);
             loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
+                tokio::time::sleep(interval).await;
                 info!("LxmfNode BLE: periodic re-announce");
                 transport_reannounce
                     .lock()
@@ -2459,26 +2474,32 @@ pub(crate) fn mp_read_lxmf_fields(data: &[u8], pos: &mut usize) -> (Option<(Stri
 }
 
 /// Build announce app_data.
-/// Beacon nodes: `b"anonmesh::beacon::v1\0" + display_name` so CLI can discover them via startswith.
-/// Non-beacon nodes: just the display name (legacy behaviour).
+/// Beacon nodes: `b"anonmesh::beacon::v1\0" + display_name` — parsed by CLI beacon scanner.
+/// Non-beacon nodes: msgpack fixarray(2) [name:str, stamp_cost:f64(0.0)] — Sideband-compatible.
 pub(crate) fn build_app_data(display_name: &str, is_beacon: bool) -> Vec<u8> {
     const PREFIX: &[u8] = b"anonmesh::beacon::v1\0";
     let name = if display_name.is_empty() { "lxmf-mobile" } else { display_name };
-    // Truncate at a UTF-8 character boundary ≤ 32 bytes to avoid splitting multi-byte codepoints.
-    let truncated_len = name.char_indices()
-        .take_while(|(i, _)| *i < 32)
-        .last()
-        .map(|(i, c)| i + c.len_utf8())
-        .unwrap_or(0)
-        .min(name.len());
-    let name_bytes = &name.as_bytes()[..truncated_len];
+    // Truncate at UTF-8 char boundary ≤ 31 bytes (msgpack fixstr max).
+    let mut end = name.len().min(31);
+    while !name.is_char_boundary(end) { end -= 1; }
+    let name_b = &name.as_bytes()[..end];
     if is_beacon {
-        let mut data = Vec::with_capacity(PREFIX.len() + name_bytes.len());
+        let mut data = Vec::with_capacity(PREFIX.len() + name_b.len());
         data.extend_from_slice(PREFIX);
-        data.extend_from_slice(name_bytes);
+        data.extend_from_slice(name_b);
         data
     } else {
-        name_bytes.to_vec()
+        // msgpack: fixarray(2) [fixstr(name), float64(0.0)]
+        // fixarray(2) = 0x92
+        // fixstr(len) = 0xa0 | len  (safe: name_b.len() <= 31 < 0x1f)
+        // float64 stamp_cost = 0xcb + 8 BE bytes
+        let mut buf = Vec::with_capacity(1 + 1 + name_b.len() + 9);
+        buf.push(0x92);
+        buf.push(0xa0 | name_b.len() as u8);
+        buf.extend_from_slice(name_b);
+        buf.push(0xcb);
+        buf.extend_from_slice(&0.0f64.to_bits().to_be_bytes());
+        buf
     }
 }
 

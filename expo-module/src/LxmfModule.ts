@@ -52,6 +52,10 @@ export type NativeModuleType = {
   setBeaconKeypair(keyHex: string): boolean;
   setBeaconSolanaRpc(url: string): boolean;
 
+  // Propagation node — store-and-forward relay mode (Mode 3 TCP only)
+  setPropagationNode(enable: boolean): boolean;
+  syncPropagation(): Promise<boolean>;
+
   // Configuration
   setLogLevel(level: number): boolean;
   abiVersion(): number;
@@ -112,6 +116,8 @@ const missingNativeShim: NativeModuleType = {
   getProgramId: () => throwMissingNative(),
   setBeaconKeypair: () => throwMissingNative(),
   setBeaconSolanaRpc: () => throwMissingNative(),
+  setPropagationNode: () => throwMissingNative(),
+  syncPropagation: async () => throwMissingNative(),
   getNusUnpairedRNodes: () => throwMissingNative(),
   pairNusRNode: () => throwMissingNative(),
   connectedRNodeCount: () => throwMissingNative(),

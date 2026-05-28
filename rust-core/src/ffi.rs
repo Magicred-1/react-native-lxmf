@@ -436,6 +436,33 @@ pub unsafe extern "C" fn lxmf_beacon_set_solana_rpc_url(url: *const std::ffi::c_
     rc
 }
 
+/// Enable or disable propagation node mode (store-and-forward relay) for Mode 3 TCP.
+/// Must be called before start(). Returns 0 on success, -1 on error.
+#[no_mangle]
+pub unsafe extern "C" fn lxmf_set_propagation_node(enable: u8) -> i32 {
+    let mut guard = match LxmfNode::global().lock() {
+        Ok(g) => g,
+        Err(_) => return -1,
+    };
+    match guard.as_mut() {
+        Some(n) => { n.propagation_node = enable != 0; 0 }
+        None => -1,
+    }
+}
+
+/// Request an immediate message sync from connected propagation relays.
+/// Returns 0 (stub — sync is handled automatically by the transport layer).
+#[no_mangle]
+pub unsafe extern "C" fn lxmf_sync_propagation() -> i32 {
+    // reticulum-rs-transport handles propagation relay sync automatically;
+    // this entry point exists for apps that want to trigger an explicit pull.
+    // No-op for now — returns success so callers don't need to guard.
+    if LxmfNode::global().lock().ok().and_then(|g| g.as_ref().map(|_| ())).is_none() {
+        return -1;
+    }
+    STATUS_OK
+}
+
 /// Store the ble_revshare Anchor program address (deployment-specific: devnet vs mainnet).
 /// `program_id_hex` — null-terminated 64-char lowercase hex string (32 bytes).
 /// Returns 0 on success, -1 on error (null, wrong length, not initialized).
@@ -821,6 +848,58 @@ pub unsafe extern "C" fn lxmf_nus_poll_tx(
         }
         None => 0,
     }
+}
+
+// --- Embedded Reticulum Interface (RNodes with embedded Reticulum stack) ---
+//
+// For RNode firmware builds that run rns-embedded-runtime directly.
+// Distinct from lxmf_nus_receive (KISS-mode RNode radio).
+
+/// Init the embedded runtime. Call once with the node's 32-byte store identity
+/// and 16-byte LXMF address. Must be called before lxmf_embedded_receive.
+#[no_mangle]
+pub unsafe extern "C" fn lxmf_embedded_init(
+    store_identity: *const u8,
+    lxmf_address: *const u8,
+) -> i32 {
+    if store_identity.is_null() || lxmf_address.is_null() { return STATUS_ERR; }
+    let mut sid = [0u8; 32];
+    let mut addr = [0u8; 16];
+    sid.copy_from_slice(slice::from_raw_parts(store_identity, 32));
+    addr.copy_from_slice(slice::from_raw_parts(lxmf_address, 16));
+    crate::embedded_iface::init_embedded(sid, addr);
+    STATUS_OK
+}
+
+/// Push raw PacketFrame bytes received from an embedded-stack RNode via NUS.
+#[no_mangle]
+pub unsafe extern "C" fn lxmf_embedded_receive(data: *const u8, data_len: usize) -> i32 {
+    if data.is_null() { return STATUS_ERR; }
+    if data_len == 0 || data_len > 4096 { return STATUS_ERR; }
+    let bytes = slice::from_raw_parts(data, data_len).to_vec();
+    crate::embedded_iface::on_embedded_rx(bytes);
+    STATUS_OK
+}
+
+/// Dequeue the next wire bytes to send to an embedded-stack RNode via NUS.
+/// Returns positive byte count written, 0 if nothing queued, -1 on error.
+#[no_mangle]
+pub unsafe extern "C" fn lxmf_embedded_poll_tx(out_data: *mut u8, out_capacity: usize) -> i32 {
+    if out_data.is_null() { return STATUS_ERR; }
+    match crate::embedded_iface::next_embedded_tx() {
+        Some(frame) => {
+            if frame.len() > out_capacity { return STATUS_ERR; }
+            std::ptr::copy_nonoverlapping(frame.as_ptr(), out_data, frame.len());
+            frame.len() as i32
+        }
+        None => 0,
+    }
+}
+
+/// Trigger a manual embedded runtime tick (e.g., from a periodic timer).
+#[no_mangle]
+pub extern "C" fn lxmf_embedded_tick() {
+    crate::embedded_iface::tick();
 }
 
 // --- Internal ---

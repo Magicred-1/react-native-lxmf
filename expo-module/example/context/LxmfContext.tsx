@@ -122,6 +122,9 @@ export type LxmfContextValue = {
   /** @deprecated Use cosignAndSubmit or requestUnsignedTx+submitSignedTx */
   partialSignExecutePayment: (payerKeyHex: string, nonceBlockhashHex: string, accountsJson: string, paramsJson: string) => string | null;
   extractNonceBlockhash: (accountDataB64: string) => string | null;
+  // Propagation relay
+  setPropagationNode: (enable: boolean) => boolean;
+  syncPropagation: () => Promise<boolean>;
   // Groups
   groups: Group[];
   createGroup: (name: string) => { addrHex: string; keyHex: string };
@@ -421,6 +424,8 @@ export function LxmfProvider({ children }: { readonly children: React.ReactNode 
     getProgramId: lxmf.getProgramId,
     partialSignExecutePayment: lxmf.partialSignExecutePayment,
     extractNonceBlockhash: lxmf.extractNonceBlockhash,
+    setPropagationNode: lxmf.setPropagationNode,
+    syncPropagation: lxmf.syncPropagation,
     groups,
     createGroup,
     joinGroup,
@@ -435,6 +440,7 @@ export function LxmfProvider({ children }: { readonly children: React.ReactNode 
     lxmf.requestUnsignedTx, lxmf.submitSignedTx, lxmf.cosignAndSubmit,
     lxmf.setProgramId, lxmf.getProgramId,
     lxmf.partialSignExecutePayment, lxmf.extractNonceBlockhash,
+    lxmf.setPropagationNode, lxmf.syncPropagation,
     send, fetchMessages, identity, identityHydrated, clearIdentity,
     displayName, setDisplayName, contacts, upsertContact, markRead,
     groups, createGroup, joinGroup, leaveGroup, isGroup, shareGroupInvite,
