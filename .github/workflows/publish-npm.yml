@@ -122,18 +122,23 @@ jobs:
           name: android-jniLibs
           path: dist/android/
 
-  # ── Publish: assemble artifacts + npm publish ───────────────────────────────
   publish:
     runs-on: ubuntu-latest
     needs: [test-rust, build-ios, build-android]
     environment: CI/CD Expo Build for iOS
+    permissions:
+      id-token: write        # ← required: lets the runner mint the OIDC token
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24    # ← was 20; too old for the OIDC handshake
           registry-url: 'https://registry.npmjs.org'
+
+      - name: Ensure npm supports OIDC
+        run: npm install -g npm@latest   # need >= 11.5.1
 
       - name: Set version from run number
         working-directory: expo-module
@@ -161,5 +166,4 @@ jobs:
       - name: Publish to npm
         working-directory: expo-module
         run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # no env block — OIDC handles auth
