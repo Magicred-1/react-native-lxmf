@@ -44,7 +44,7 @@
   "homepage": "https://anonme.sh",
   "repository": {
     "type": "git",
-    "url": "https://github.com/anon0mesh/lxmf_react_native_rust.git"
+    "url": "https://github.com/Magicred-1/react-native-lxmf.git"
   },
   "license": "MIT",
   "publishConfig": {
