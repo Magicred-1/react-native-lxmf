@@ -249,6 +249,16 @@ class LxmfModule : Module() {
       nativeSetBeaconSolanaRpc(url) == 0
     }
 
+    // --- Propagation relay ---
+
+    Function("setPropagationNode") { enable: Boolean ->
+      nativeSetPropagationNode(enable) == 0
+    }
+
+    AsyncFunction("syncPropagation") {
+      nativeSyncPropagation() == 0
+    }
+
     // --- Group Chat ---
 
     Function("createGroup") { name: String, keyHex: String ->
@@ -341,6 +351,8 @@ class LxmfModule : Module() {
   private external fun nativeBeaconRpc(destHashHex: String, method: String, paramsJson: String?): Long
   private external fun nativeSetLogLevel(level: Int): Int
   private external fun nativeAbiVersion(): Int
+  private external fun nativeSetPropagationNode(enable: Boolean): Int
+  private external fun nativeSyncPropagation(): Int
   private external fun nativePartialSignExecutePayment(payerKeyBytes: ByteArray, nonceBlockhash: ByteArray, accountsJson: String, paramsJson: String): String?
   private external fun nativeExtractNonceBlockhash(accountDataB64: String): String?
   private external fun nativeSignTx(payerKeyBytes: ByteArray, txB64: String): String?

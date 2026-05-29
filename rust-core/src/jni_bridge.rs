@@ -667,6 +667,25 @@ pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeAbiVersion(
     LxmfNode::abi_version() as jint
 }
 
+// --- Propagation relay ---
+
+#[no_mangle]
+pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeSetPropagationNode(
+    _env: JNIEnv,
+    _class: JClass,
+    enable: jboolean,
+) -> jint {
+    unsafe { crate::ffi::lxmf_set_propagation_node(if enable == JNI_TRUE { 1 } else { 0 }) }
+}
+
+#[no_mangle]
+pub extern "C" fn Java_expo_modules_lxmf_LxmfModule_nativeSyncPropagation(
+    _env: JNIEnv,
+    _class: JClass,
+) -> jint {
+    unsafe { crate::ffi::lxmf_sync_propagation() }
+}
+
 // --- BLE Interface ---
 //
 // These JNI methods are called by the Kotlin BleManager, which owns all BLE hardware access.

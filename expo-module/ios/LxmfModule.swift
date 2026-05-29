@@ -78,6 +78,12 @@ func lxmf_set_log_level(_ level: UInt32) -> Int32
 @_silgen_name("lxmf_abi_version")
 func lxmf_abi_version() -> UInt32
 
+@_silgen_name("lxmf_set_propagation_node")
+func lxmf_set_propagation_node(_ enable: UInt8) -> Int32
+
+@_silgen_name("lxmf_sync_propagation")
+func lxmf_sync_propagation() -> Int32
+
 @_silgen_name("lxmf_fetch_messages")
 func lxmf_fetch_messages(
     _ limit: UInt32,
@@ -595,6 +601,16 @@ public class LxmfModule: Module {
 
         Function("setBeaconSolanaRpc") { (url: String) -> Bool in
             return url.withCString { lxmf_beacon_set_solana_rpc_url($0) == 0 }
+        }
+
+        // --- Propagation relay ---
+
+        Function("setPropagationNode") { (enable: Bool) -> Bool in
+            return lxmf_set_propagation_node(enable ? 1 : 0) == 0
+        }
+
+        AsyncFunction("syncPropagation") { () -> Bool in
+            return lxmf_sync_propagation() == 0
         }
 
         // --- Group Chat ---
