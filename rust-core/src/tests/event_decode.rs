@@ -8,45 +8,38 @@ fn wire_bytes(title: &[u8], body: &[u8], fields_mp: &[u8]) -> Vec<u8> {
     w
 }
 
-// ── invalid / unparseable payloads fall back to raw body ──────────────────────
+// ── invalid / unparseable payloads are dropped (never emitted as raw body) ─────
+//
+// Regression guard: previously these fell back to `MessageReceived { body: data }`,
+// leaking raw wire/ciphertext into the UI as a base64 blob ("🔒 couldn't decrypt").
+// The fix drops undecodable payloads — lxmf_event_from_bytes returns None.
 
 #[test]
-fn too_short_falls_back_to_raw_body() {
-    let data = vec![0u8; 10];
-    let ev = lxmf_event_from_bytes(addr(1), data.clone(), None);
-    match ev {
-        LxmfEvent::MessageReceived { body, title, image, files, .. } => {
-            assert_eq!(body, data);
-            assert!(title.is_empty());
-            assert!(image.is_none());
-            assert!(files.is_empty());
-        }
-        _ => panic!("expected MessageReceived"),
-    }
+fn too_short_is_dropped() {
+    let ev = lxmf_event_from_bytes(addr(1), vec![0u8; 10], None);
+    assert!(ev.is_none(), "short payload must drop, not emit raw body");
 }
 
 #[test]
-fn garbage_bytes_fall_back_to_raw_body() {
+fn garbage_bytes_are_dropped() {
     let data = vec![0xdeu8, 0xad, 0xbe, 0xef, 0x00, 0x11];
-    let ev = lxmf_event_from_bytes(addr(2), data.clone(), None);
-    match ev {
-        LxmfEvent::MessageReceived { body, .. } => assert_eq!(body, data),
-        _ => panic!("expected MessageReceived"),
-    }
+    let ev = lxmf_event_from_bytes(addr(2), data, None);
+    assert!(ev.is_none(), "garbage must drop, not emit raw body");
 }
 
 #[test]
-fn empty_vec_falls_back_to_empty_raw_body() {
+fn empty_vec_is_dropped() {
     let ev = lxmf_event_from_bytes(addr(3), vec![], None);
-    match ev {
-        LxmfEvent::MessageReceived { body, title, image, files, .. } => {
-            assert!(body.is_empty());
-            assert!(title.is_empty());
-            assert!(image.is_none());
-            assert!(files.is_empty());
-        }
-        _ => panic!("expected MessageReceived"),
-    }
+    assert!(ev.is_none());
+}
+
+/// A full-size high-entropy blob (e.g. an undecryptable 135-byte wire) must
+/// never surface as a message body. This is the exact shape of the original bug.
+#[test]
+fn high_entropy_blob_is_dropped_not_rendered() {
+    let blob: Vec<u8> = (0..135u16).map(|i| (i.wrapping_mul(167) ^ 0x5a) as u8).collect();
+    let ev = lxmf_event_from_bytes(addr(0x7e), blob, None);
+    assert!(ev.is_none(), "ciphertext-looking blob must drop, never become a body");
 }
 
 // ── well-formed LXMF payload decoded correctly ────────────────────────────────
@@ -54,7 +47,7 @@ fn empty_vec_falls_back_to_empty_raw_body() {
 #[test]
 fn valid_payload_extracts_body() {
     let data = wire_bytes(b"", b"hello world", &[0x80]);
-    let ev = lxmf_event_from_bytes(addr(4), data, None);
+    let ev = lxmf_event_from_bytes(addr(4), data, None).expect("decodable");
     match ev {
         LxmfEvent::MessageReceived { body, .. } => assert_eq!(body, b"hello world"),
         _ => panic!("expected MessageReceived"),
@@ -64,7 +57,7 @@ fn valid_payload_extracts_body() {
 #[test]
 fn valid_payload_extracts_title() {
     let data = wire_bytes(b"My Subject", b"body text", &[0x80]);
-    let ev = lxmf_event_from_bytes(addr(5), data, None);
+    let ev = lxmf_event_from_bytes(addr(5), data, None).expect("decodable");
     match ev {
         LxmfEvent::MessageReceived { title, body, .. } => {
             assert_eq!(title, b"My Subject");
@@ -78,7 +71,7 @@ fn valid_payload_extracts_title() {
 fn valid_payload_source_address_preserved() {
     let src = addr(0xab);
     let data = wire_bytes(b"", b"msg", &[0x80]);
-    let ev = lxmf_event_from_bytes(src, data, None);
+    let ev = lxmf_event_from_bytes(src, data, None).expect("decodable");
     match ev {
         LxmfEvent::MessageReceived { source, .. } => assert_eq!(source, src),
         _ => panic!("expected MessageReceived"),
@@ -88,7 +81,7 @@ fn valid_payload_source_address_preserved() {
 #[test]
 fn valid_payload_no_media_yields_none_image_and_empty_files() {
     let data = wire_bytes(b"", b"text only", &build_fields_msgpack(None));
-    let ev = lxmf_event_from_bytes(addr(6), data, None);
+    let ev = lxmf_event_from_bytes(addr(6), data, None).expect("decodable");
     match ev {
         LxmfEvent::MessageReceived { image, files, .. } => {
             assert!(image.is_none());
@@ -107,7 +100,7 @@ fn valid_payload_with_image_decoded() {
         base64::engine::general_purpose::STANDARD.encode(img)
     );
     let data = wire_bytes(b"", b"caption", &build_fields_msgpack(Some(&json)));
-    let ev = lxmf_event_from_bytes(addr(7), data, None);
+    let ev = lxmf_event_from_bytes(addr(7), data, None).expect("decodable");
     match ev {
         LxmfEvent::MessageReceived { image, body, .. } => {
             let (mime, bytes) = image.expect("image present");
@@ -129,7 +122,7 @@ fn valid_payload_with_files_decoded() {
         b64.encode(b"png bytes"),
     );
     let data = wire_bytes(b"", b"", &build_fields_msgpack(Some(&json)));
-    let ev = lxmf_event_from_bytes(addr(8), data, None);
+    let ev = lxmf_event_from_bytes(addr(8), data, None).expect("decodable");
     match ev {
         LxmfEvent::MessageReceived { files, .. } => {
             assert_eq!(files.len(), 2);
@@ -146,7 +139,7 @@ fn valid_payload_with_files_decoded() {
 #[test]
 fn timestamp_is_reasonable() {
     let data = wire_bytes(b"", b"body", &[0x80]);
-    let ev = lxmf_event_from_bytes(addr(9), data, None);
+    let ev = lxmf_event_from_bytes(addr(9), data, None).expect("decodable");
     match ev {
         LxmfEvent::MessageReceived { timestamp, .. } => {
             assert!(timestamp > 1_600_000_000, "timestamp should be post-2020: {timestamp}");

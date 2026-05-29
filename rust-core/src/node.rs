@@ -327,6 +327,9 @@ impl LxmfNode {
         });
 
         let addr_hex = lxmf_addr_hex;
+        // Our 16-byte LXMF address — prepended when a foreign client strips the
+        // destination hash from an opportunistic payload (see normalize_lxmf_wire).
+        let my_lxmf_addr = addr_hex_to_bytes(&addr_hex);
 
         // Push status event
         if let Ok(mut eq) = events.lock() {
@@ -485,12 +488,10 @@ impl LxmfNode {
                 match data_rx.recv().await {
                     Ok(received) => {
                         let data = received.data.as_slice().to_vec();
-                        let src = if data.len() >= 32 {
-                            let mut s = [0u8; 16]; s.copy_from_slice(&data[16..32]); s
-                        } else { [0u8; 16] };
 
                         // JSON/zlib payload: either a beacon RPC request (beacon mode)
-                        // or a beacon RPC response (client mode).
+                        // or a beacon RPC response (client mode). Checked on the raw
+                        // bytes before LXMF normalization (RPC is not LXMF wire).
                         if looks_like_rpc_response(&data) {
                             info!("LxmfNode: received {} bytes of RPC payload", data.len());
                             if is_beacon_mode && crate::beacon_server::is_rpc_request(&data) {
@@ -542,6 +543,17 @@ impl LxmfNode {
                             continue;
                         }
 
+                        // Reconstruct the canonical 96-byte LXMF wire. Foreign clients
+                        // strip the destination hash for opportunistic delivery; drop
+                        // anything that isn't a recognizable LXMF payload (never leak
+                        // raw/ciphertext-looking bytes into a message body).
+                        let Some(data) = normalize_lxmf_wire(&data, &my_lxmf_addr) else {
+                            warn!("LxmfNode: undecodable {}B inbound payload, dropping", data.len());
+                            continue;
+                        };
+                        let mut src = [0u8; 16];
+                        src.copy_from_slice(&data[16..32]);
+
                         info!("LxmfNode: received {} bytes from {}", data.len(), hex::encode(&src));
 
                         // Fire request_path unconditionally so the sender re-announces
@@ -579,7 +591,7 @@ impl LxmfNode {
                                     hex::encode(&src));
                             }
                         }
-                        let event = lxmf_event_from_bytes(src, data, None);
+                        let Some(event) = lxmf_event_from_bytes(src, data, None) else { continue };
                         persist_inbound_message(&store_data, &event);
                         if let Ok(mut eq) = events_data.lock() {
                             if eq.len() < 4096 {
@@ -606,12 +618,14 @@ impl LxmfNode {
                 match resource_rx.recv().await {
                     Ok(event) => {
                         if let ResourceEventKind::Complete(complete) = event.kind {
-                            let data = complete.data;
-                            let src = if data.len() >= 32 {
-                                let mut s = [0u8; 16]; s.copy_from_slice(&data[16..32]); s
-                            } else { [0u8; 16] };
+                            let Some(data) = normalize_lxmf_wire(&complete.data, &my_lxmf_addr) else {
+                                warn!("LxmfNode: undecodable {}B resource, dropping", complete.data.len());
+                                continue;
+                            };
+                            let mut src = [0u8; 16];
+                            src.copy_from_slice(&data[16..32]);
                             info!("LxmfNode: resource complete {} bytes from {}", data.len(), hex::encode(&src));
-                            let lxmf_event = lxmf_event_from_bytes(src, data, None);
+                            let Some(lxmf_event) = lxmf_event_from_bytes(src, data, None) else { continue };
                             persist_inbound_message(&store_res, &lxmf_event);
                             if let Ok(mut eq) = events_res.lock() {
                                 eq.push_back(lxmf_event);
@@ -793,10 +807,11 @@ impl LxmfNode {
                             Ok(dec) if dec.len() >= 97 => {
                                 let mut src = [0u8; 16];
                                 src.copy_from_slice(&dec[16..32]);
-                                let event = lxmf_event_from_bytes(src, dec.clone(), Some(dest));
-                                persist_inbound_message(&store_group, &event);
-                                if let Ok(mut eq) = events_group.lock() {
-                                    if eq.len() < 1024 { eq.push_back(event); }
+                                if let Some(event) = lxmf_event_from_bytes(src, dec.clone(), Some(dest)) {
+                                    persist_inbound_message(&store_group, &event);
+                                    if let Ok(mut eq) = events_group.lock() {
+                                        if eq.len() < 1024 { eq.push_back(event); }
+                                    }
                                 }
                             }
                             Ok(_) => warn!("Group RX: decrypted payload too short"),
@@ -915,6 +930,9 @@ impl LxmfNode {
         });
 
         let addr_hex = lxmf_addr_hex;
+        // Our 16-byte LXMF address — prepended when a foreign client strips the
+        // destination hash from an opportunistic payload (see normalize_lxmf_wire).
+        let my_lxmf_addr = addr_hex_to_bytes(&addr_hex);
 
         if let Ok(mut eq) = events.lock() {
             eq.push_back(LxmfEvent::StatusChanged { running: true, lifecycle: 4 });
@@ -1061,12 +1079,10 @@ impl LxmfNode {
                 match data_rx.recv().await {
                     Ok(received) => {
                         let data = received.data.as_slice().to_vec();
-                        let src = if data.len() >= 32 {
-                            let mut s = [0u8; 16]; s.copy_from_slice(&data[16..32]); s
-                        } else { [0u8; 16] };
 
                         // JSON/zlib payload: either a beacon RPC request (beacon mode)
-                        // or a beacon RPC response (client mode).
+                        // or a beacon RPC response (client mode). Checked on the raw
+                        // bytes before LXMF normalization (RPC is not LXMF wire).
                         if looks_like_rpc_response(&data) {
                             info!("LxmfNode full: received {} bytes of RPC payload", data.len());
                             if is_beacon_mode && crate::beacon_server::is_rpc_request(&data) {
@@ -1116,6 +1132,16 @@ impl LxmfNode {
                             continue;
                         }
 
+                        // Reconstruct the canonical 96-byte LXMF wire (foreign clients
+                        // strip the destination hash for opportunistic delivery); drop
+                        // anything that isn't a recognizable LXMF payload.
+                        let Some(data) = normalize_lxmf_wire(&data, &my_lxmf_addr) else {
+                            warn!("LxmfNode full: undecodable {}B inbound payload, dropping", data.len());
+                            continue;
+                        };
+                        let mut src = [0u8; 16];
+                        src.copy_from_slice(&data[16..32]);
+
                         info!("LxmfNode full: received {} bytes from {}", data.len(), hex::encode(&src));
 
                         if src != [0u8; 16] {
@@ -1143,7 +1169,7 @@ impl LxmfNode {
                                     hex::encode(&src));
                             }
                         }
-                        let event = lxmf_event_from_bytes(src, data, None);
+                        let Some(event) = lxmf_event_from_bytes(src, data, None) else { continue };
                         persist_inbound_message(&store_data, &event);
                         if let Ok(mut eq) = events_data.lock() {
                             if eq.len() < 4096 {
@@ -1170,12 +1196,14 @@ impl LxmfNode {
                 match resource_rx.recv().await {
                     Ok(event) => {
                         if let ResourceEventKind::Complete(complete) = event.kind {
-                            let data = complete.data;
-                            let src = if data.len() >= 32 {
-                                let mut s = [0u8; 16]; s.copy_from_slice(&data[16..32]); s
-                            } else { [0u8; 16] };
+                            let Some(data) = normalize_lxmf_wire(&complete.data, &my_lxmf_addr) else {
+                                warn!("LxmfNode full: undecodable {}B resource, dropping", complete.data.len());
+                                continue;
+                            };
+                            let mut src = [0u8; 16];
+                            src.copy_from_slice(&data[16..32]);
                             info!("LxmfNode full: resource complete {} bytes from {}", data.len(), hex::encode(&src));
-                            let lxmf_event = lxmf_event_from_bytes(src, data, None);
+                            let Some(lxmf_event) = lxmf_event_from_bytes(src, data, None) else { continue };
                             persist_inbound_message(&store_res, &lxmf_event);
                             if let Ok(mut eq) = events_res.lock() {
                                 eq.push_back(lxmf_event);
@@ -1384,10 +1412,11 @@ impl LxmfNode {
                             Ok(dec) if dec.len() >= 97 => {
                                 let mut src = [0u8; 16];
                                 src.copy_from_slice(&dec[16..32]);
-                                let event = lxmf_event_from_bytes(src, dec.clone(), Some(dest));
-                                persist_inbound_message(&store_group, &event);
-                                if let Ok(mut eq) = events_group.lock() {
-                                    if eq.len() < 1024 { eq.push_back(event); }
+                                if let Some(event) = lxmf_event_from_bytes(src, dec.clone(), Some(dest)) {
+                                    persist_inbound_message(&store_group, &event);
+                                    if let Ok(mut eq) = events_group.lock() {
+                                        if eq.len() < 1024 { eq.push_back(event); }
+                                    }
                                 }
                             }
                             Ok(_) => warn!("Group RX full: decrypted payload too short"),
@@ -1822,6 +1851,9 @@ impl LxmfNode {
             });
 
         info!("LxmfNode BLE: LXMF delivery address = {}", addr_hex);
+        // Our 16-byte LXMF address — prepended when a foreign client strips the
+        // destination hash from an opportunistic payload (see normalize_lxmf_wire).
+        let my_lxmf_addr = addr_hex_to_bytes(&addr_hex);
 
         // Push status event.
         if let Ok(mut eq) = events.lock() {
@@ -1958,15 +1990,22 @@ impl LxmfNode {
                 match data_rx.recv().await {
                     Ok(received) => {
                         let data = received.data.as_slice().to_vec();
-                        let src = if data.len() >= 32 {
-                            let mut s = [0u8; 16]; s.copy_from_slice(&data[16..32]); s
-                        } else { [0u8; 16] };
 
                         // Beacon RPC responses are JSON or zlib-compressed, not LXMF-framed.
                         if looks_like_rpc_response(&data) {
                             // BLE-only mode has no RPC dispatch task — silently discard.
                             continue;
                         }
+
+                        // Reconstruct the canonical 96-byte LXMF wire (foreign clients
+                        // strip the destination hash for opportunistic delivery); drop
+                        // anything that isn't a recognizable LXMF payload.
+                        let Some(data) = normalize_lxmf_wire(&data, &my_lxmf_addr) else {
+                            warn!("LxmfNode BLE: undecodable {}B inbound payload, dropping", data.len());
+                            continue;
+                        };
+                        let mut src = [0u8; 16];
+                        src.copy_from_slice(&data[16..32]);
 
                         info!("LxmfNode BLE: received {} bytes from {}", data.len(), hex::encode(&src));
 
@@ -2000,7 +2039,7 @@ impl LxmfNode {
                             }
                         }
 
-                        let event = lxmf_event_from_bytes(src, data, None);
+                        let Some(event) = lxmf_event_from_bytes(src, data, None) else { continue };
                         persist_inbound_message(&store_data, &event);
                         if let Ok(mut eq) = events_data.lock() {
                             if eq.len() < 4096 {
@@ -2027,12 +2066,14 @@ impl LxmfNode {
                 match resource_rx.recv().await {
                     Ok(event) => {
                         if let ResourceEventKind::Complete(complete) = event.kind {
-                            let data = complete.data;
-                            let src = if data.len() >= 32 {
-                                let mut s = [0u8; 16]; s.copy_from_slice(&data[16..32]); s
-                            } else { [0u8; 16] };
+                            let Some(data) = normalize_lxmf_wire(&complete.data, &my_lxmf_addr) else {
+                                warn!("LxmfNode BLE: undecodable {}B resource, dropping", complete.data.len());
+                                continue;
+                            };
+                            let mut src = [0u8; 16];
+                            src.copy_from_slice(&data[16..32]);
                             info!("LxmfNode BLE: resource complete {} bytes from {}", data.len(), hex::encode(&src));
-                            let lxmf_event = lxmf_event_from_bytes(src, data, None);
+                            let Some(lxmf_event) = lxmf_event_from_bytes(src, data, None) else { continue };
                             persist_inbound_message(&store_res, &lxmf_event);
                             if let Ok(mut eq) = events_res.lock() {
                                 eq.push_back(lxmf_event);
@@ -2118,10 +2159,11 @@ impl LxmfNode {
                             Ok(dec) if dec.len() >= 97 => {
                                 let mut src = [0u8; 16];
                                 src.copy_from_slice(&dec[16..32]);
-                                let event = lxmf_event_from_bytes(src, dec.clone(), Some(dest));
-                                persist_inbound_message(&store_group, &event);
-                                if let Ok(mut eq) = events_group.lock() {
-                                    if eq.len() < 1024 { eq.push_back(event); }
+                                if let Some(event) = lxmf_event_from_bytes(src, dec.clone(), Some(dest)) {
+                                    persist_inbound_message(&store_group, &event);
+                                    if let Ok(mut eq) = events_group.lock() {
+                                        if eq.len() < 1024 { eq.push_back(event); }
+                                    }
                                 }
                             }
                             Ok(_) => warn!("Group RX BLE: decrypted payload too short"),
@@ -2280,20 +2322,29 @@ fn looks_like_rpc_response(data: &[u8]) -> bool {
 
 /// Decode an inbound LXMF wire payload and return a MessageReceived event.
 /// Falls back to raw body if the payload cannot be parsed.
-pub(crate) fn lxmf_event_from_bytes(src: LxmfAddress, data: Vec<u8>, group_dest: Option<LxmfAddress>) -> LxmfEvent {
+/// Build a `MessageReceived` event from a canonical LXMF wire payload.
+///
+/// Returns `None` when the payload cannot be parsed as LXMF. The caller MUST
+/// drop a `None` — we never emit raw bytes as a message body, because that
+/// surfaces ciphertext-looking wire data into the UI (the "🔒 couldn't decrypt"
+/// blob bug). Inbound bytes are expected to already be normalized to the
+/// canonical 96-byte-header form via `normalize_lxmf_wire`.
+pub(crate) fn lxmf_event_from_bytes(src: LxmfAddress, data: Vec<u8>, group_dest: Option<LxmfAddress>) -> Option<LxmfEvent> {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    if let Some(dec) = decode_lxmf_payload(&data) {
-        LxmfEvent::MessageReceived {
+    match decode_lxmf_payload(&data) {
+        Some(dec) => Some(LxmfEvent::MessageReceived {
             source: src, title: dec.title, body: dec.body,
             image: dec.image, files: dec.files, timestamp: ts, group_dest,
-        }
-    } else {
-        LxmfEvent::MessageReceived {
-            source: src, title: vec![], body: data,
-            image: None, files: vec![], timestamp: ts, group_dest,
+        }),
+        None => {
+            warn!(
+                "lxmf_event_from_bytes: undecodable {}B payload from {}, dropping (not emitting ciphertext as body)",
+                data.len(), hex::encode(src)
+            );
+            None
         }
     }
 }
@@ -2346,18 +2397,121 @@ pub(crate) fn verify_lxmf_signature(
 }
 
 /// Parse an LXMF wire payload.
-/// Format: [16B dest][16B src][64B sig][msgpack([f64 ts, bin title, bin body, map fields])]
+/// Format: [16B dest][16B src][64B sig][msgpack([ts, title, content, fields, ...])]
+///
+/// Tolerant of foreign-client (Sideband / python-LXMF) variance:
+/// - array length **≥ 4** (extra trailing elements — stamps/tickets — are ignored),
+/// - timestamp as float64 / float32 / any msgpack integer,
+/// - title & content as bin **or** str (via `mp_read_bytes`).
+///
+/// Expects `data` already normalized to the canonical 96-byte-header form
+/// (see [`normalize_lxmf_wire`]). Never panics; returns `None` on anything
+/// it cannot parse.
 pub(crate) fn decode_lxmf_payload(data: &[u8]) -> Option<DecodedLxmf> {
     if data.len() < 97 { return None; }
     let mp = &data[96..];
-    if mp.first() != Some(&0x94) { return None; } // fixarray(4)
-    let mut pos = 1usize;
-    if mp.get(pos) != Some(&0xcb) { return None; } // float64 timestamp
-    pos += 9;
-    let title = mp_read_bytes(mp, &mut pos).unwrap_or_default();
-    let body  = mp_read_bytes(mp, &mut pos).unwrap_or_default();
-    let (image, files) = mp_read_lxmf_fields(mp, &mut pos);
+    let (arr_len, mut pos) = mp_array_header(mp)?;
+    if arr_len < 4 { return None; } // LXMF payload is [ts, title, content, fields]
+    mp_skip_numeric(mp, &mut pos)?; // element 0: timestamp (f64/f32/int)
+    let title = mp_read_bytes(mp, &mut pos).unwrap_or_default(); // element 1
+    let body  = mp_read_bytes(mp, &mut pos).unwrap_or_default(); // element 2
+    let (image, files) = mp_read_lxmf_fields(mp, &mut pos);      // element 3: fields map
     Some(DecodedLxmf { title, body, image, files })
+}
+
+/// Read a msgpack array header at offset 0. Returns `(element_count, bytes_consumed)`.
+/// Handles fixarray (0x9X), array16 (0xdc), array32 (0xdd).
+pub(crate) fn mp_array_header(mp: &[u8]) -> Option<(usize, usize)> {
+    match *mp.first()? {
+        b if b & 0xf0 == 0x90 => Some(((b & 0x0f) as usize, 1)),
+        0xdc => Some((((*mp.get(1)? as usize) << 8) | *mp.get(2)? as usize, 3)),
+        0xdd => {
+            let n = ((*mp.get(1)? as usize) << 24)
+                | ((*mp.get(2)? as usize) << 16)
+                | ((*mp.get(3)? as usize) << 8)
+                | (*mp.get(4)? as usize);
+            Some((n, 5))
+        }
+        _ => None,
+    }
+}
+
+/// True if `b` begins a msgpack numeric scalar (any int width, float32, float64).
+pub(crate) fn mp_is_numeric_marker(b: u8) -> bool {
+    matches!(b, 0x00..=0x7f)   // positive fixint
+        || matches!(b, 0xe0..=0xff)   // negative fixint
+        || matches!(b, 0xca | 0xcb)   // float32 / float64
+        || matches!(b, 0xcc..=0xd3)   // uint8..uint64, int8..int64
+}
+
+/// Skip one msgpack numeric scalar at `*pos`. Returns `None` if not a numeric marker.
+pub(crate) fn mp_skip_numeric(mp: &[u8], pos: &mut usize) -> Option<()> {
+    let b = *mp.get(*pos)?;
+    let width = match b {
+        0x00..=0x7f | 0xe0..=0xff => 1,    // fixint (value in the marker byte)
+        0xcc | 0xd0 => 2,                  // uint8 / int8
+        0xcd | 0xd1 => 3,                  // uint16 / int16
+        0xce | 0xd2 | 0xca => 5,           // uint32 / int32 / float32
+        0xcf | 0xd3 | 0xcb => 9,           // uint64 / int64 / float64
+        _ => return None,
+    };
+    if *pos + width > mp.len() { return None; }
+    *pos += width;
+    Some(())
+}
+
+/// True if `mp` looks like the start of an LXMF msgpack payload:
+/// an array of length ≥ 4 whose first element is a numeric (the timestamp).
+fn looks_like_lxmf_payload(mp: &[u8]) -> bool {
+    match mp_array_header(mp) {
+        Some((len, hdr)) if len >= 4 => {
+            mp.get(hdr).copied().map(mp_is_numeric_marker).unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+/// Normalize an inbound payload to the canonical LXMF wire:
+/// `[16B dest][16B src][64B sig][msgpack]`.
+///
+/// Reference LXMF clients send `packed[16:]` for **opportunistic** delivery —
+/// i.e. they strip the leading 16-byte destination hash (it is implicit in the
+/// Reticulum packet's addressing). That yields an 80-byte header
+/// `[16B src][64B sig][msgpack]`. Reticulum hands that decrypted payload straight
+/// up, so without this step the parser reads the msgpack at the wrong offset,
+/// fails, and the raw wire leaks into the message body as base64 garbage.
+///
+/// Detection is by locating the msgpack array+numeric-timestamp marker after the
+/// 64-byte signature: at offset 96 (destination present) or offset 80
+/// (destination stripped). When stripped, `my_addr` is prepended so all
+/// downstream code (src extraction, signature verification, payload decode)
+/// sees a uniform 96-byte header.
+///
+/// Returns `None` when no recognizable LXMF payload is found at either offset.
+pub(crate) fn normalize_lxmf_wire(payload: &[u8], my_addr: &[u8; 16]) -> Option<Vec<u8>> {
+    // Canonical: destination hash present.
+    if payload.len() >= 97 && looks_like_lxmf_payload(&payload[96..]) {
+        return Some(payload.to_vec());
+    }
+    // Destination stripped (opportunistic): reconstruct by prepending our address.
+    if payload.len() >= 81 && looks_like_lxmf_payload(&payload[80..]) {
+        let mut full = Vec::with_capacity(16 + payload.len());
+        full.extend_from_slice(my_addr);
+        full.extend_from_slice(payload);
+        return Some(full);
+    }
+    None
+}
+
+/// Decode our 16-byte LXMF delivery address from its hex form, for use as the
+/// destination prefix when reconstructing dest-stripped opportunistic payloads.
+/// Returns all-zero on malformed input (which simply disables reconstruction).
+pub(crate) fn addr_hex_to_bytes(addr_hex: &str) -> [u8; 16] {
+    let mut a = [0u8; 16];
+    if let Ok(b) = hex::decode(addr_hex) {
+        if b.len() == 16 { a.copy_from_slice(&b); }
+    }
+    a
 }
 
 pub(crate) fn mp_read_bytes(data: &[u8], pos: &mut usize) -> Option<Vec<u8>> {

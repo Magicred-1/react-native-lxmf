@@ -6,6 +6,7 @@ mod interface_parsing;
 mod event_decode;
 mod store_persist;
 mod lxmf_wire;
+mod link_decode;
 mod node_queue;
 mod ble_synthetic_announce;
 mod ble_pending_flush;
