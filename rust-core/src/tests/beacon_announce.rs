@@ -122,6 +122,30 @@ fn non_beacon_first_byte_is_fixarray2() {
     assert_eq!(d[0], 0x92, "Sideband expects msgpack fixarray(2)");
 }
 
+// ── display-name decode (announce app_data → clean UTF-8) ─────────────────────
+
+#[test]
+fn decode_name_from_our_non_beacon_msgpack() {
+    use crate::node::decode_display_name;
+    let d = build_app_data("Alice", false); // msgpack [fixstr name, f64]
+    assert_eq!(decode_display_name(&d), "Alice");
+}
+
+#[test]
+fn decode_name_from_beacon_prefix() {
+    use crate::node::decode_display_name;
+    let d = build_app_data("RelayNode", true); // anonmesh::beacon::v1\0RelayNode
+    assert_eq!(decode_display_name(&d), "RelayNode");
+}
+
+#[test]
+fn decode_name_from_sideband_style_bin_array() {
+    use crate::node::decode_display_name;
+    // [ bin8 "Bob", nil ] — Sideband / LXMF-rs form
+    let app_data = [0x92u8, 0xc4, 0x03, b'B', b'o', b'b', 0xc0];
+    assert_eq!(decode_display_name(&app_data), "Bob");
+}
+
 #[test]
 fn non_beacon_stamp_cost_is_zero() {
     let d = build_app_data("test", false);

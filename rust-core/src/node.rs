@@ -1502,11 +1502,8 @@ impl LxmfNode {
         let fields_mp = build_fields_msgpack(media_json);
         let msgpack = encode_lxmf_msgpack(timestamp, b"", content, &fields_mp);
 
-        let mut sign_data = Vec::with_capacity(16 + 16 + msgpack.len());
-        sign_data.extend_from_slice(&dest_arr);
-        sign_data.extend_from_slice(&source_hash_bytes);
-        sign_data.extend_from_slice(&msgpack);
-        let signature = private_identity.sign(&sign_data).to_bytes();
+        // LXMF spec signature: sign(dest + src + payload + SHA256(dest+src+payload)).
+        let signature = lxmf_sign(&private_identity, &dest_arr, &source_hash_bytes, &msgpack);
 
         let mut lxmf_payload = Vec::with_capacity(16 + 16 + 64 + msgpack.len());
         lxmf_payload.extend_from_slice(&dest_arr);
@@ -1739,12 +1736,9 @@ impl LxmfNode {
         let fields_mp = build_fields_msgpack(media_json);
         let msgpack = encode_lxmf_msgpack(timestamp, b"", content, &fields_mp);
 
-        // Sign dest+src+msgpack so recipients can verify authorship once they cache our identity.
-        let mut sign_data = Vec::with_capacity(16 + 16 + msgpack.len());
-        sign_data.extend_from_slice(&dest_arr);
-        sign_data.extend_from_slice(&source_hash_bytes);
-        sign_data.extend_from_slice(&msgpack);
-        let signature = private_identity.sign(&sign_data).to_bytes();
+        // LXMF spec signature (same as send_to) so any standard LXMF client in
+        // the group can verify authorship: sign(dest+src+payload+SHA256(...)).
+        let signature = lxmf_sign(&private_identity, &dest_arr, &source_hash_bytes, &msgpack);
 
         let mut lxmf_payload = Vec::with_capacity(16 + 16 + 64 + msgpack.len());
         lxmf_payload.extend_from_slice(&dest_arr);
@@ -2384,10 +2378,67 @@ pub(crate) struct DecodedLxmf {
     pub(crate) files: Vec<(String, Vec<u8>)>,
 }
 
+/// SHA-256 over `hashed_part`, matching `RNS.Identity.full_hash` used by LXMF's
+/// signature (`LXMessage.pack`). Full 32-byte digest (not the truncated address hash).
+pub(crate) fn lxmf_message_hash(hashed_part: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(hashed_part);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&h.finalize());
+    out
+}
+
+/// Reconstruct the canonical signed payload — the stamp-stripped 4-element
+/// msgpack `fixarray(4) [ts, title, content, fields]` that the LXMF signature is
+/// computed over (`Payload::to_msgpack_without_stamp`).
+///
+/// Reference clients sign over 4 elements even when the wire payload carries a
+/// 5th `stamp` element, so a verifier must drop it. The header is rewritten to
+/// `0x94` (canonical fixarray-4, what rmp_serde emits) so the bytes match the
+/// sender's stamp-less serialization regardless of how the wire framed the array.
+pub(crate) fn lxmf_signed_payload(data: &[u8]) -> Option<Vec<u8>> {
+    let mp = data.get(96..)?;
+    let (arr_len, hdr) = mp_array_header(mp)?;
+    if arr_len < 4 { return None; }
+    let mut pos = hdr;
+    for _ in 0..4 {
+        let before = pos;
+        mp_skip(mp, &mut pos); // ts, title, content, fields
+        if pos <= before || pos > mp.len() { return None; }
+    }
+    let elems = mp.get(hdr..pos)?;
+    let mut out = Vec::with_capacity(1 + elems.len());
+    out.push(0x94); // fixarray(4) — canonical header for the 4 signed elements
+    out.extend_from_slice(elems);
+    Some(out)
+}
+
+/// Produce the LXMF signature for an outgoing packet, per spec:
+/// `sign( dest + src + payload + SHA256(dest + src + payload) )`.
+/// `payload` is our outgoing (stamp-less) msgpack, so it already equals the
+/// signed payload. Makes Sideband / standard LXMF clients accept our messages.
+pub(crate) fn lxmf_sign(
+    private_identity: &rns_transport::identity::PrivateIdentity,
+    dest: &[u8],
+    src: &[u8],
+    payload: &[u8],
+) -> [u8; 64] {
+    let mut hashed = Vec::with_capacity(dest.len() + src.len() + payload.len());
+    hashed.extend_from_slice(dest);
+    hashed.extend_from_slice(src);
+    hashed.extend_from_slice(payload);
+    let hash = lxmf_message_hash(&hashed);
+    let mut signed = hashed;
+    signed.extend_from_slice(&hash);
+    private_identity.sign(&signed).to_bytes()
+}
+
 /// Verify the Ed25519 signature on an inbound LXMF wire packet.
 ///
 /// LXMF wire: [0..16] dest | [16..32] src | [32..96] sig | [96..] msgpack
-/// Signed region: data[0..32] + data[96..]  (dest + src + msgpack payload)
+/// Spec signed region (`LXMessage.pack`): `hashed_part + SHA256(hashed_part)`
+/// where `hashed_part = dest + src + payload_without_stamp`.
 ///
 /// Returns:
 /// - `Some(true)`  — sender known, signature valid
@@ -2404,10 +2455,28 @@ pub(crate) fn verify_lxmf_signature(
     let Ok(sig) = ed25519_dalek::Signature::from_slice(&data[32..96]) else {
         return Some(false);
     };
-    let mut signed = Vec::with_capacity(32 + data.len() - 96);
-    signed.extend_from_slice(&data[0..32]);
-    signed.extend_from_slice(&data[96..]);
-    Some(desc.identity.verify(&signed, &sig).is_ok())
+
+    // Spec region: hashed_part = dest + src + payload_without_stamp, then append
+    // its SHA-256 and verify. This is what Sideband / standard LXMF sign.
+    if let Some(without_stamp) = lxmf_signed_payload(data) {
+        let mut hashed = Vec::with_capacity(32 + without_stamp.len());
+        hashed.extend_from_slice(&data[0..32]);
+        hashed.extend_from_slice(&without_stamp);
+        let hash = lxmf_message_hash(&hashed);
+        let mut signed = hashed;
+        signed.extend_from_slice(&hash);
+        if desc.identity.verify(&signed, &sig).is_ok() {
+            return Some(true);
+        }
+    }
+
+    // Legacy fallback: pre-spec crate releases signed `dest + src + wire_payload`
+    // with no appended hash. Accept those during the upgrade window so two app
+    // versions still interoperate. TODO: remove one release after rollout.
+    let mut legacy = Vec::with_capacity(32 + data.len() - 96);
+    legacy.extend_from_slice(&data[0..32]);
+    legacy.extend_from_slice(&data[96..]);
+    Some(desc.identity.verify(&legacy, &sig).is_ok())
 }
 
 /// Parse an LXMF wire payload.
@@ -2488,6 +2557,33 @@ pub(crate) fn mp_read_numeric_f64(mp: &[u8], pos: &mut usize) -> Option<f64> {
         _ => return None,
     };
     Some(value)
+}
+
+/// Decode a peer display name from announce `app_data`.
+///
+/// Three forms are handled:
+/// - Beacon prefix: raw `anonmesh::beacon::v1\0<name>` (our beacon nodes).
+/// - msgpack `[name, stamp_cost]` (Sideband / standard LXMF / our non-beacon
+///   nodes): name is element 0, a msgpack bin or str.
+/// - Anything else: best-effort lossy UTF-8 of the whole blob.
+///
+/// Avoids the mojibake from running `from_utf8_lossy` over raw msgpack bytes.
+pub(crate) fn decode_display_name(app_data: &[u8]) -> String {
+    const BEACON_PREFIX: &[u8] = b"anonmesh::beacon::v1\0";
+    if let Some(rest) = app_data.strip_prefix(BEACON_PREFIX) {
+        return String::from_utf8_lossy(rest).into_owned();
+    }
+    if let Some((arr_len, hdr)) = mp_array_header(app_data) {
+        if arr_len >= 1 {
+            let mut pos = hdr;
+            if let Some(name) = mp_read_bytes(app_data, &mut pos) {
+                if let Ok(s) = std::str::from_utf8(&name) {
+                    return s.to_string();
+                }
+            }
+        }
+    }
+    String::from_utf8_lossy(app_data).into_owned()
 }
 
 /// True if `mp` looks like the start of an LXMF msgpack payload:

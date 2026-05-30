@@ -956,7 +956,9 @@ fn events_to_json(events: &[crate::node::LxmfEvent]) -> String {
         }
         LxmfEvent::AnnounceReceived { dest_hash, app_data, hops } => serde_json::json!({
             "type": "announceReceived", "destHash": hex::encode(dest_hash),
-            "appData": String::from_utf8_lossy(app_data).to_string(), "hops": hops,
+            // Decode the msgpack/beacon app_data into a clean display name instead
+            // of lossy-decoding raw msgpack bytes (which produced mojibake).
+            "appData": crate::node::decode_display_name(app_data), "hops": hops,
         }),
         LxmfEvent::MessageQueued { seq, dest_hex } => serde_json::json!({
             "type": "messageQueued", "seq": seq, "destHex": dest_hex,

@@ -7,6 +7,7 @@ mod event_decode;
 mod store_persist;
 mod lxmf_wire;
 mod link_decode;
+mod signature_spec;
 mod node_queue;
 mod ble_synthetic_announce;
 mod ble_pending_flush;
