@@ -69,6 +69,14 @@ export interface RpcResponseEvent {
 
 export interface LxmfEvent {
   type: 'statusChanged' | 'packetReceived' | 'txReceived' | 'beaconDiscovered' | 'messageReceived' | 'announceReceived' | 'messageQueued' | 'messageDelivered' | 'messageFailed' | 'log' | 'error' | 'rpcResponse' | 'rnodeConnected' | 'rnodeDisconnected';
+  /**
+   * Strictly-increasing, unique id assigned by the native layer to every event
+   * (monotonic in delivery order). Track the highest id you've processed
+   * (`lastSeenId`) instead of comparing the head event by reference — this is
+   * eviction-safe: a burst that overflows the event buffer can never silently
+   * drop or duplicate an unread message.
+   */
+  id?: number;
   [key: string]: any;
 }
 
@@ -140,7 +148,10 @@ export function useLxmf(options: UseLxmfOptions = {}) {
 
   const pushEvent = useCallback((type: LxmfEvent['type'], payload: Record<string, any>) => {
     const event = { ...payload, type } as LxmfEvent;
-    setEvents((prev: LxmfEvent[]) => [event, ...prev].slice(0, 200));
+    // Newest-first, capped buffer. Cap raised from 200 → 1000 so a burst of
+    // messages/announces can't evict unread events before consumers drain them.
+    // Consumers should still track `event.id` (lastSeenId), not the head ref.
+    setEvents((prev: LxmfEvent[]) => [event, ...prev].slice(0, 1000));
     return event;
   }, []);
 

@@ -137,12 +137,36 @@ fn valid_payload_with_files_decoded() {
 // ── timestamp is set (non-zero unix epoch for post-2020 systems) ──────────────
 
 #[test]
-fn timestamp_is_reasonable() {
+fn burst_messages_keep_distinct_subsecond_timestamps() {
+    // Three messages "received" in the same wall-clock second must keep the
+    // distinct sub-second wire timestamps — the bug collapsed them to one.
+    let base = 1_700_000_000.0f64;
+    let tss = [base, base + 0.123, base + 0.456];
+    let mut got = Vec::new();
+    for (i, &ts) in tss.iter().enumerate() {
+        let mp = encode_lxmf_msgpack(ts, b"", format!("msg{i}").as_bytes(), &[0x80]);
+        let mut wire = vec![0u8; 96];
+        wire.extend_from_slice(&mp);
+        let ev = lxmf_event_from_bytes(addr(0x40 + i as u8), wire, None).expect("decodable");
+        match ev {
+            LxmfEvent::MessageReceived { timestamp, .. } => got.push(timestamp),
+            _ => panic!("expected MessageReceived"),
+        }
+    }
+    assert_eq!(got, tss, "all three sub-second timestamps preserved, in order");
+    assert_ne!(got[0], got[1]);
+    assert_ne!(got[1], got[2]);
+}
+
+#[test]
+fn wire_timestamp_is_preserved_not_receive_time() {
+    // wire_bytes packs timestamp 1_700_000_000.0; the event must carry THAT,
+    // not SystemTime::now() — otherwise same-second bursts collapse.
     let data = wire_bytes(b"", b"body", &[0x80]);
     let ev = lxmf_event_from_bytes(addr(9), data, None).expect("decodable");
     match ev {
         LxmfEvent::MessageReceived { timestamp, .. } => {
-            assert!(timestamp > 1_600_000_000, "timestamp should be post-2020: {timestamp}");
+            assert_eq!(timestamp, 1_700_000_000.0, "wire timestamp must be preserved");
         }
         _ => panic!("expected MessageReceived"),
     }

@@ -131,18 +131,25 @@ export default function ConversationScreen() {
 
   // Build merged, sorted, deduped bubble list
   const bubbles = useMemo((): BubbleMsg[] => {
-    const sqlKeys = new Set(sqlMsgs.map(m => String(m.id)));
+    // Dedup live-vs-persisted by content identity (source|timestamp|body), NOT by
+    // id — the event id and the SQL row id are different namespaces. The wire
+    // timestamp is sub-second (f64), so this key stays unique within a burst.
+    const sqlContentKeys = new Set(
+      sqlMsgs.map(m => `${m.source}|${m.timestamp}|${m.body}`)
+    );
     const liveExtra: BubbleMsg[] = events
       .filter(e => e.type === 'messageReceived' && (
         isGroupThread ? e.groupDest === address : e.source === address && !e.groupDest
       ))
-      .filter(e => !sqlKeys.has(String(e.id)))
+      .filter(e => !sqlContentKeys.has(`${e.source}|${e.timestamp}|${e.body}`))
       .map(e => ({
-        key: `live-${e.source}-${e.timestamp ?? Date.now()}`,
+        // Key by the unique monotonic event id so same-second messages never
+        // collapse into one React node.
+        key: e.id != null ? `live-${e.id}` : `live-${e.source}-${e.timestamp}`,
         outbound: false,
         title: String(e.title ?? ''),
         body: String(e.body ?? ''),
-        timestamp: typeof e.timestamp === 'number' ? e.timestamp : Math.floor(Date.now() / 1000),
+        timestamp: typeof e.timestamp === 'number' ? e.timestamp : Date.now() / 1000,
         acked: false,
         image: e.image,
         files: e.files,

@@ -979,5 +979,23 @@ fn events_to_json(events: &[crate::node::LxmfEvent]) -> String {
         }),
     }).collect();
 
+    // Stamp every event with a strictly-increasing id. Events are drained exactly
+    // once (drain_events pops the queue), so each event is serialized once and gets
+    // a unique, monotonic id in delivery order. JS consumers track `lastSeenId`
+    // instead of the head-event reference, so a burst that evicts the 200-cap
+    // buffer can never silently drop or duplicate unread messages.
+    let mut arr = arr;
+    for v in arr.iter_mut() {
+        let id = EVENT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("id".into(), serde_json::json!(id));
+        }
+    }
+
     serde_json::to_string(&arr).unwrap_or_else(|_| "[]".into())
 }
+
+/// Monotonic event id source. Assigned at serialize time (one id per drained
+/// event), giving JS an eviction-safe `lastSeenId` watermark across the event
+/// buffer cap. Starts at 1 so 0 can mean "nothing seen yet" on the JS side.
+static EVENT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);

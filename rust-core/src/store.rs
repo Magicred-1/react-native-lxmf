@@ -23,7 +23,7 @@ impl MessageStore {
                 image_data   BLOB,
                 files_json   TEXT,
                 outbound     INTEGER NOT NULL DEFAULT 0,
-                timestamp    INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+                timestamp    REAL    NOT NULL DEFAULT (strftime('%s','now')),
                 acked        INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS solana_txs (
@@ -70,7 +70,7 @@ impl MessageStore {
         body: &[u8],
         image: Option<(&str, &[u8])>,
         files: &[(String, Vec<u8>)],
-        timestamp: u64,
+        timestamp: f64,
     ) -> Result<i64, rusqlite::Error> {
         let image_mime: Option<&str> = image.map(|(m, _)| m);
         let image_data: Option<&[u8]> = image.map(|(_, d)| d);
@@ -99,7 +99,7 @@ impl MessageStore {
                 image_mime,
                 image_data,
                 files_json,
-                timestamp as i64,
+                timestamp,
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -155,7 +155,7 @@ impl MessageStore {
             let image_data: Option<Vec<u8>> = row.get(6)?;
             let files_json: Option<String> = row.get(7)?;
             let outbound: i32              = row.get(8)?;
-            let timestamp: i64             = row.get(9)?;
+            let timestamp: f64             = row.get(9)?;
             let acked: i32                 = row.get(10)?;
             Ok((id, source_hex, dest_hex, title_bytes, body_bytes, image_mime, image_data, files_json, outbound, timestamp, acked))
         })?.filter_map(|r| r.ok()).map(|(id, source, dest, title_b, body_b, img_mime, img_data, files_j, outbound, ts, acked)| {

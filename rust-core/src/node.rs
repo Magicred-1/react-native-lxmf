@@ -42,7 +42,10 @@ pub enum LxmfEvent {
         body: Vec<u8>,
         image: Option<(String, Vec<u8>)>,
         files: Vec<(String, Vec<u8>)>,
-        timestamp: u64,
+        /// Wire timestamp in seconds (f64, sub-second precision preserved from the
+        /// LXMF payload). NOT the receive time — two messages in the same second
+        /// keep distinct fractional values so the UI never collapses a burst.
+        timestamp: f64,
         /// Set for group channel messages: the group destination address.
         /// JS routes the message to the group thread instead of a DM thread.
         group_dest: Option<LxmfAddress>,
@@ -2330,15 +2333,24 @@ fn looks_like_rpc_response(data: &[u8]) -> bool {
 /// blob bug). Inbound bytes are expected to already be normalized to the
 /// canonical 96-byte-header form via `normalize_lxmf_wire`.
 pub(crate) fn lxmf_event_from_bytes(src: LxmfAddress, data: Vec<u8>, group_dest: Option<LxmfAddress>) -> Option<LxmfEvent> {
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
     match decode_lxmf_payload(&data) {
-        Some(dec) => Some(LxmfEvent::MessageReceived {
-            source: src, title: dec.title, body: dec.body,
-            image: dec.image, files: dec.files, timestamp: ts, group_dest,
-        }),
+        Some(dec) => {
+            // Preserve the wire timestamp (sub-second f64) so a burst of messages
+            // in the same wall-clock second stays distinct and correctly ordered.
+            // Fall back to receive time only if the wire timestamp is unusable.
+            let timestamp = if dec.timestamp.is_finite() && dec.timestamp > 0.0 {
+                dec.timestamp
+            } else {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0)
+            };
+            Some(LxmfEvent::MessageReceived {
+                source: src, title: dec.title, body: dec.body,
+                image: dec.image, files: dec.files, timestamp, group_dest,
+            })
+        }
         None => {
             warn!(
                 "lxmf_event_from_bytes: undecodable {}B payload from {}, dropping (not emitting ciphertext as body)",
@@ -2364,6 +2376,8 @@ pub(crate) fn persist_inbound_message(store: &Option<Arc<MessageStore>>, event: 
 }
 
 pub(crate) struct DecodedLxmf {
+    /// Wire timestamp in seconds (LXMF `time.time()`), full f64 precision.
+    pub(crate) timestamp: f64,
     pub(crate) title: Vec<u8>,
     pub(crate) body: Vec<u8>,
     pub(crate) image: Option<(String, Vec<u8>)>,
@@ -2412,11 +2426,11 @@ pub(crate) fn decode_lxmf_payload(data: &[u8]) -> Option<DecodedLxmf> {
     let mp = &data[96..];
     let (arr_len, mut pos) = mp_array_header(mp)?;
     if arr_len < 4 { return None; } // LXMF payload is [ts, title, content, fields]
-    mp_skip_numeric(mp, &mut pos)?; // element 0: timestamp (f64/f32/int)
+    let timestamp = mp_read_numeric_f64(mp, &mut pos)?; // element 0: timestamp (f64/f32/int)
     let title = mp_read_bytes(mp, &mut pos).unwrap_or_default(); // element 1
     let body  = mp_read_bytes(mp, &mut pos).unwrap_or_default(); // element 2
     let (image, files) = mp_read_lxmf_fields(mp, &mut pos);      // element 3: fields map
-    Some(DecodedLxmf { title, body, image, files })
+    Some(DecodedLxmf { timestamp, title, body, image, files })
 }
 
 /// Read a msgpack array header at offset 0. Returns `(element_count, bytes_consumed)`.
@@ -2444,20 +2458,36 @@ pub(crate) fn mp_is_numeric_marker(b: u8) -> bool {
         || matches!(b, 0xcc..=0xd3)   // uint8..uint64, int8..int64
 }
 
-/// Skip one msgpack numeric scalar at `*pos`. Returns `None` if not a numeric marker.
-pub(crate) fn mp_skip_numeric(mp: &[u8], pos: &mut usize) -> Option<()> {
+/// Read one msgpack numeric scalar at `*pos` as f64, advancing `*pos`.
+/// Handles every msgpack int width plus float32/float64. Returns `None` if the
+/// marker is not numeric or the value runs past the buffer. Used for the LXMF
+/// wire timestamp (element 0), which reference clients pack as float64 seconds
+/// (`time.time()`) but which must be tolerated as float32 or any integer.
+pub(crate) fn mp_read_numeric_f64(mp: &[u8], pos: &mut usize) -> Option<f64> {
+    // Read `n` big-endian bytes at *pos, advancing pos.
+    fn take<'a>(mp: &'a [u8], pos: &mut usize, n: usize) -> Option<&'a [u8]> {
+        let s = mp.get(*pos..*pos + n)?;
+        *pos += n;
+        Some(s)
+    }
     let b = *mp.get(*pos)?;
-    let width = match b {
-        0x00..=0x7f | 0xe0..=0xff => 1,    // fixint (value in the marker byte)
-        0xcc | 0xd0 => 2,                  // uint8 / int8
-        0xcd | 0xd1 => 3,                  // uint16 / int16
-        0xce | 0xd2 | 0xca => 5,           // uint32 / int32 / float32
-        0xcf | 0xd3 | 0xcb => 9,           // uint64 / int64 / float64
+    *pos += 1;
+    let value = match b {
+        0x00..=0x7f => b as f64,                                              // positive fixint
+        0xe0..=0xff => (b as i8) as f64,                                      // negative fixint
+        0xca => f32::from_be_bytes(take(mp, pos, 4)?.try_into().ok()?) as f64,// float32
+        0xcb => f64::from_be_bytes(take(mp, pos, 8)?.try_into().ok()?),       // float64
+        0xcc => take(mp, pos, 1)?[0] as f64,                                  // uint8
+        0xcd => u16::from_be_bytes(take(mp, pos, 2)?.try_into().ok()?) as f64,// uint16
+        0xce => u32::from_be_bytes(take(mp, pos, 4)?.try_into().ok()?) as f64,// uint32
+        0xcf => u64::from_be_bytes(take(mp, pos, 8)?.try_into().ok()?) as f64,// uint64
+        0xd0 => (take(mp, pos, 1)?[0] as i8) as f64,                          // int8
+        0xd1 => i16::from_be_bytes(take(mp, pos, 2)?.try_into().ok()?) as f64,// int16
+        0xd2 => i32::from_be_bytes(take(mp, pos, 4)?.try_into().ok()?) as f64,// int32
+        0xd3 => i64::from_be_bytes(take(mp, pos, 8)?.try_into().ok()?) as f64,// int64
         _ => return None,
     };
-    if *pos + width > mp.len() { return None; }
-    *pos += width;
-    Some(())
+    Some(value)
 }
 
 /// True if `mp` looks like the start of an LXMF msgpack payload:

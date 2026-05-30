@@ -16,7 +16,7 @@ fn inbound_basic_roundtrip() {
     let store = open_mem();
     let source = src(0xaa);
     let dest   = dst(0x00);
-    store.insert_inbound_message(&source, &dest, b"hello", b"world", None, &[], 1_700_000_000)
+    store.insert_inbound_message(&source, &dest, b"hello", b"world", None, &[], 1_700_000_000.0)
         .expect("insert");
     let json = store.fetch_messages(10).expect("fetch");
     let rows: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
@@ -36,7 +36,7 @@ fn inbound_source_hash_preserved_as_hex() {
         0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
         0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
     ];
-    store.insert_inbound_message(&source, &dst(0), b"", b"x", None, &[], 0).expect("insert");
+    store.insert_inbound_message(&source, &dst(0), b"", b"x", None, &[], 0.0).expect("insert");
     let json = store.fetch_messages(10).expect("fetch");
     let rows: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
     let src_hex = rows[0]["source"].as_str().unwrap().to_lowercase();
@@ -49,7 +49,7 @@ fn inbound_with_image_stored_and_retrieved() {
     let img_data = b"\xff\xd8\xff\xe0fake_jpeg";
     store.insert_inbound_message(
         &src(1), &dst(0), b"", b"see pic",
-        Some(("image/jpeg", img_data)), &[], 0,
+        Some(("image/jpeg", img_data)), &[], 0.0,
     ).expect("insert");
     let json = store.fetch_messages(10).expect("fetch");
     let rows: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
@@ -69,7 +69,7 @@ fn inbound_with_files_stored_and_retrieved() {
         ("doc.pdf".into(), b"pdf bytes".to_vec()),
         ("img.png".into(), b"png bytes".to_vec()),
     ];
-    store.insert_inbound_message(&src(2), &dst(0), b"", b"files", None, &files, 0)
+    store.insert_inbound_message(&src(2), &dst(0), b"", b"files", None, &files, 0.0)
         .expect("insert");
     let json = store.fetch_messages(10).expect("fetch");
     let rows: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
@@ -86,7 +86,7 @@ fn inbound_with_files_stored_and_retrieved() {
 #[test]
 fn inbound_title_stored_as_base64() {
     let store = open_mem();
-    store.insert_inbound_message(&src(3), &dst(0), b"My Title", b"body", None, &[], 0)
+    store.insert_inbound_message(&src(3), &dst(0), b"My Title", b"body", None, &[], 0.0)
         .expect("insert");
     let json = store.fetch_messages(10).expect("fetch");
     let rows: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
@@ -105,7 +105,7 @@ fn persist_inbound_message_helper_inserts_message_received_event() {
         body: b"body text".to_vec(),
         image: None,
         files: vec![],
-        timestamp: 1_700_000_000,
+        timestamp: 1_700_000_000.0,
         group_dest: None,
     };
     persist_inbound_message(&Some(store.clone()), &event);
@@ -123,7 +123,7 @@ fn persist_inbound_message_helper_inserts_message_received_event() {
 fn persist_inbound_message_noop_on_none_store() {
     let event = LxmfEvent::MessageReceived {
         source: src(1),
-        title: vec![], body: vec![], image: None, files: vec![], timestamp: 0, group_dest: None,
+        title: vec![], body: vec![], image: None, files: vec![], timestamp: 0.0, group_dest: None,
     };
     // must not panic
     persist_inbound_message(&None, &event);
@@ -200,7 +200,7 @@ fn outbound_queue_multiple_dests_independent() {
 fn fetch_messages_limit_respected() {
     let store = open_mem();
     for i in 0u8..10 {
-        store.insert_inbound_message(&src(i), &dst(0), b"", b"x", None, &[], 0).expect("insert");
+        store.insert_inbound_message(&src(i), &dst(0), b"", b"x", None, &[], 0.0).expect("insert");
     }
     let json = store.fetch_messages(3).expect("fetch");
     let rows: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();

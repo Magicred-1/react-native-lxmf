@@ -103,6 +103,29 @@ fn bin8(b: &[u8]) -> Vec<u8> {
 }
 
 #[test]
+fn float64_timestamp_value_preserved() {
+    let mp = encode_lxmf_msgpack(1_700_000_123.456, b"", b"x", &build_fields_msgpack(None));
+    let mut w = vec![0u8; 96];
+    w.extend_from_slice(&mp);
+    let dec = decode_lxmf_payload(&w).expect("decode");
+    assert_eq!(dec.timestamp, 1_700_000_123.456);
+}
+
+#[test]
+fn integer_timestamp_value_preserved() {
+    // [ uint32 ts=1700001100, bin "", bin body, fixmap{} ]
+    let mut mp = vec![0x94, 0xce];
+    mp.extend_from_slice(&1_700_001_100u32.to_be_bytes());
+    mp.extend_from_slice(&bin8(b""));
+    mp.extend_from_slice(&bin8(b"body"));
+    mp.push(0x80);
+    let mut w = vec![0u8; 96];
+    w.extend_from_slice(&mp);
+    let dec = decode_lxmf_payload(&w).expect("decode");
+    assert_eq!(dec.timestamp, 1_700_001_100.0);
+}
+
+#[test]
 fn integer_timestamp_decodes() {
     // [ uint32 ts, bin "", bin body, fixmap{} ]
     let mut mp = vec![0x94];
