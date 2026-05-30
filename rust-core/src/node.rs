@@ -2470,9 +2470,14 @@ pub(crate) fn verify_lxmf_signature(
         }
     }
 
-    // Legacy fallback: pre-spec crate releases signed `dest + src + wire_payload`
-    // with no appended hash. Accept those during the upgrade window so two app
-    // versions still interoperate. TODO: remove one release after rollout.
+    // Legacy fallback: pre-spec crate releases (≤ 0.2.x, before the 2026-05-30
+    // signature fix) signed `dest + src + wire_payload` with no appended hash.
+    // Accept those during the upgrade window so two app versions interoperate.
+    //
+    // REMOVE AFTER 2026-07-15 — by then all clients sign the spec region. Once
+    // removed, a forged packet that happens to match the old region is no longer
+    // accepted (defense-in-depth). Deleting this block + its test
+    // `legacy_signed_packet_still_verifies` is the whole change.
     let mut legacy = Vec::with_capacity(32 + data.len() - 96);
     legacy.extend_from_slice(&data[0..32]);
     legacy.extend_from_slice(&data[96..]);
