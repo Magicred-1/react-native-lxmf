@@ -518,7 +518,7 @@ public class LxmfModule: Module {
                                 lxmf_partial_sign_execute_payment(
                                     pkPtr.baseAddress, nhPtr.baseAddress,
                                     accts, prms,
-                                    outPtr.baseAddress, Int32(outBuf.count))
+                                    outPtr.baseAddress, Int32(outPtr.count))
                             }
                         }
                     }
@@ -533,7 +533,7 @@ public class LxmfModule: Module {
             var outBuf = [UInt8](repeating: 0, count: 64)
             let written = accountDataB64.withCString { dataPtr in
                 outBuf.withUnsafeMutableBufferPointer { outPtr in
-                    lxmf_extract_nonce_blockhash(dataPtr, outPtr.baseAddress, Int32(outBuf.count))
+                    lxmf_extract_nonce_blockhash(dataPtr, outPtr.baseAddress, Int32(outPtr.count))
                 }
             }
             guard written == 64 else { return nil }
@@ -557,7 +557,7 @@ public class LxmfModule: Module {
             let written = payerKey.withUnsafeBufferPointer { pkPtr in
                 txB64.withCString { b64Ptr in
                     outBuf.withUnsafeMutableBufferPointer { outPtr in
-                        lxmf_sign_tx(pkPtr.baseAddress, b64Ptr, outPtr.baseAddress, outBuf.count)
+                        lxmf_sign_tx(pkPtr.baseAddress, b64Ptr, outPtr.baseAddress, outPtr.count)
                     }
                 }
             }
