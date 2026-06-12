@@ -1,3 +1,4 @@
+mod ffi_panic_guard;
 mod msgpack_encode;
 mod msgpack_decode;
 mod media_fields;
