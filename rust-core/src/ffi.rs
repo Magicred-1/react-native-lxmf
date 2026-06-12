@@ -2,6 +2,10 @@
 //!
 //! All functions are `#[no_mangle] extern "C"` with pointer+length patterns.
 //! The native layer (Swift/Kotlin) calls these, and they delegate to LxmfNode.
+//!
+//! Every exported fn body is wrapped in `catch_unwind` so that a Rust panic does NOT
+//! unwind across the C ABI (which is UB). Instead the panic is logged and STATUS_ERR /
+//! -1 is returned to the caller, keeping the process alive.
 
 use std::ffi::CStr;
 use std::os::raw::c_char;
@@ -17,20 +21,49 @@ pub const STATUS_OK: i32 = 0;
 pub const STATUS_ERR: i32 = -1;
 pub const STATUS_NOT_INIT: i32 = -2;
 
+// ---------------------------------------------------------------------------
+// Panic guard helpers
+// ---------------------------------------------------------------------------
+
+/// Log the payload of a caught panic via `error!`.
+fn log_ffi_panic(payload: &Box<dyn std::any::Any + Send>) {
+    let msg = payload.downcast_ref::<&str>().copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("(unknown panic payload)");
+    error!("PANIC at Rust/C FFI boundary: {}", msg);
+}
+
+/// Strip `file://` or `file:` URI scheme from a DB path so that POSIX calls work.
+///
+/// iOS passes `file:///var/mobile/...` from `URL.absoluteString`; rusqlite's
+/// `Connection::open` may not handle URI-prefixed paths correctly on all SQLite builds.
+/// `file:///path` → strip `file://` → `/path`; `file:path` → `path`.
+fn normalize_db_path(raw: &str) -> &str {
+    if let Some(rest) = raw.strip_prefix("file://") {
+        return rest; // "file:///path" → "/path", "file://host/path" → "host/path"
+    }
+    if let Some(rest) = raw.strip_prefix("file:") {
+        return rest;
+    }
+    raw
+}
+
 // --- Lifecycle ---
 
 #[no_mangle]
 pub unsafe extern "C" fn lxmf_init(db_path: *const c_char) -> i32 {
-    let path = if db_path.is_null() {
-        None
-    } else {
-        CStr::from_ptr(db_path).to_str().ok()
-    };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let path = if db_path.is_null() {
+            None
+        } else {
+            CStr::from_ptr(db_path).to_str().ok().map(normalize_db_path)
+        };
 
-    match LxmfNode::init(path) {
-        Ok(()) => STATUS_OK,
-        Err(_) => STATUS_ERR,
-    }
+        match LxmfNode::init(path) {
+            Ok(()) => STATUS_OK,
+            Err(_) => STATUS_ERR,
+        }
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); STATUS_ERR })
 }
 
 #[no_mangle]
@@ -44,36 +77,42 @@ pub unsafe extern "C" fn lxmf_start(
     display_name: *const c_char,
     is_beacon: u8,
 ) -> i32 {
-    let id = if identity_hex.is_null() { "" } else {
-        match CStr::from_ptr(identity_hex).to_str() { Ok(s) => s, Err(_) => return STATUS_ERR }
-    };
-    let addr = if address_hex.is_null() { "" } else {
-        match CStr::from_ptr(address_hex).to_str() { Ok(s) => s, Err(_) => return STATUS_ERR }
-    };
-    let interfaces = if tcp_interfaces_json.is_null() { "[]" } else {
-        match CStr::from_ptr(tcp_interfaces_json).to_str() { Ok(s) => s, Err(_) => return STATUS_ERR }
-    };
-    let name = if display_name.is_null() { "" } else {
-        match CStr::from_ptr(display_name).to_str() { Ok(s) => s, Err(_) => return STATUS_ERR }
-    };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let id = if identity_hex.is_null() { "" } else {
+            match CStr::from_ptr(identity_hex).to_str() { Ok(s) => s, Err(_) => return STATUS_ERR }
+        };
+        let addr = if address_hex.is_null() { "" } else {
+            match CStr::from_ptr(address_hex).to_str() { Ok(s) => s, Err(_) => return STATUS_ERR }
+        };
+        let interfaces = if tcp_interfaces_json.is_null() { "[]" } else {
+            match CStr::from_ptr(tcp_interfaces_json).to_str() { Ok(s) => s, Err(_) => return STATUS_ERR }
+        };
+        let name = if display_name.is_null() { "" } else {
+            match CStr::from_ptr(display_name).to_str() { Ok(s) => s, Err(_) => return STATUS_ERR }
+        };
 
-    match LxmfNode::start(id, addr, mode, announce_interval_ms, ble_mtu_hint, interfaces, name, is_beacon != 0) {
-        Ok(()) => STATUS_OK,
-        Err(_) => STATUS_ERR,
-    }
+        match LxmfNode::start(id, addr, mode, announce_interval_ms, ble_mtu_hint, interfaces, name, is_beacon != 0) {
+            Ok(()) => STATUS_OK,
+            Err(e) => { error!("lxmf_start failed: {}", e); STATUS_ERR }
+        }
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); STATUS_ERR })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn lxmf_stop() -> i32 {
-    match LxmfNode::stop() {
-        Ok(()) => STATUS_OK,
-        Err(_) => STATUS_ERR,
-    }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        match LxmfNode::stop() {
+            Ok(()) => STATUS_OK,
+            Err(_) => STATUS_ERR,
+        }
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); STATUS_ERR })
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn lxmf_is_running() -> i32 {
-    if LxmfNode::is_running() { 1 } else { 0 }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if LxmfNode::is_running() { 1 } else { 0 }
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); STATUS_ERR })
 }
 
 // --- Identity ---
@@ -85,29 +124,33 @@ pub unsafe extern "C" fn lxmf_is_running() -> i32 {
 /// key — callers must persist it to encrypted/secure storage.
 #[no_mangle]
 pub unsafe extern "C" fn lxmf_get_identity_hex(out_buf: *mut u8, out_capacity: usize) -> i32 {
-    if out_buf.is_null() { return STATUS_ERR; }
-    let hex = match LxmfNode::get_identity_hex() {
-        Some(s) => s,
-        None => return 0,
-    };
-    let bytes = hex.as_bytes();
-    if bytes.len() > out_capacity { return STATUS_ERR; }
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
-    bytes.len() as i32
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if out_buf.is_null() { return STATUS_ERR; }
+        let hex = match LxmfNode::get_identity_hex() {
+            Some(s) => s,
+            None => return 0,
+        };
+        let bytes = hex.as_bytes();
+        if bytes.len() > out_capacity { return STATUS_ERR; }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
+        bytes.len() as i32
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); STATUS_ERR })
 }
 
 // --- Status ---
 
 #[no_mangle]
 pub unsafe extern "C" fn lxmf_get_status(out_buf: *mut u8, out_capacity: usize) -> i32 {
-    let json = match LxmfNode::get_status_json() {
-        Ok(s) => s,
-        Err(_) => return STATUS_ERR,
-    };
-    let bytes = json.as_bytes();
-    if bytes.len() > out_capacity { return STATUS_ERR; }
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
-    bytes.len() as i32
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let json = match LxmfNode::get_status_json() {
+            Ok(s) => s,
+            Err(_) => return STATUS_ERR,
+        };
+        let bytes = json.as_bytes();
+        if bytes.len() > out_capacity { return STATUS_ERR; }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
+        bytes.len() as i32
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); STATUS_ERR })
 }
 
 // --- Events ---
@@ -118,34 +161,38 @@ pub unsafe extern "C" fn lxmf_poll_events(
     out_buf: *mut u8,
     out_capacity: usize,
 ) -> i32 {
-    let events = LxmfNode::drain_events();
-    if events.is_empty() { return 0; }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let events = LxmfNode::drain_events();
+        if events.is_empty() { return 0; }
 
-    let json = events_to_json(&events);
-    let bytes = json.as_bytes();
-    if bytes.len() > out_capacity { return STATUS_ERR; }
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
-    bytes.len() as i32
+        let json = events_to_json(&events);
+        let bytes = json.as_bytes();
+        if bytes.len() > out_capacity { return STATUS_ERR; }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
+        bytes.len() as i32
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); STATUS_ERR })
 }
 
 // --- Beacons ---
 
 #[no_mangle]
 pub unsafe extern "C" fn lxmf_get_beacons(out_buf: *mut u8, out_capacity: usize) -> i32 {
-    let guard = match LxmfNode::global().lock() {
-        Ok(g) => g,
-        Err(_) => return STATUS_ERR,
-    };
-    let node = match guard.as_ref() {
-        Some(n) => n,
-        None => return STATUS_NOT_INIT,
-    };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let guard = match LxmfNode::global().lock() {
+            Ok(g) => g,
+            Err(_) => return STATUS_ERR,
+        };
+        let node = match guard.as_ref() {
+            Some(n) => n,
+            None => return STATUS_NOT_INIT,
+        };
 
-    let json = node.beacon_mgr.lock().map(|m| m.beacons_json()).unwrap_or_else(|_| "[]".to_string());
-    let bytes = json.as_bytes();
-    if bytes.len() > out_capacity { return STATUS_ERR; }
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
-    bytes.len() as i32
+        let json = node.beacon_mgr.lock().map(|m| m.beacons_json()).unwrap_or_else(|_| "[]".to_string());
+        let bytes = json.as_bytes();
+        if bytes.len() > out_capacity { return STATUS_ERR; }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
+        bytes.len() as i32
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); STATUS_ERR })
 }
 
 #[no_mangle]
@@ -154,23 +201,25 @@ pub unsafe extern "C" fn lxmf_on_announce(
     app_data_ptr: *const u8,
     app_data_len: usize,
 ) -> i32 {
-    if dest_hash_ptr.is_null() || app_data_ptr.is_null() { return STATUS_ERR; }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if dest_hash_ptr.is_null() || app_data_ptr.is_null() { return STATUS_ERR; }
 
-    let mut dest_hash: DestHash = [0u8; 16];
-    dest_hash.copy_from_slice(slice::from_raw_parts(dest_hash_ptr, 16));
-    let app_data = slice::from_raw_parts(app_data_ptr, app_data_len);
+        let mut dest_hash: DestHash = [0u8; 16];
+        dest_hash.copy_from_slice(slice::from_raw_parts(dest_hash_ptr, 16));
+        let app_data = slice::from_raw_parts(app_data_ptr, app_data_len);
 
-    let mut guard = match LxmfNode::global().lock() {
-        Ok(g) => g,
-        Err(_) => return STATUS_ERR,
-    };
-    let node = match guard.as_mut() {
-        Some(n) => n,
-        None => return STATUS_NOT_INIT,
-    };
+        let mut guard = match LxmfNode::global().lock() {
+            Ok(g) => g,
+            Err(_) => return STATUS_ERR,
+        };
+        let node = match guard.as_mut() {
+            Some(n) => n,
+            None => return STATUS_NOT_INIT,
+        };
 
-    if let Ok(mut mgr) = node.beacon_mgr.lock() { mgr.on_announce_received(dest_hash, app_data); }
-    STATUS_OK
+        if let Ok(mut mgr) = node.beacon_mgr.lock() { mgr.on_announce_received(dest_hash, app_data); }
+        STATUS_OK
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); STATUS_ERR })
 }
 
 /// Queue a JSON-RPC 2.0 call to a specific beacon.
@@ -187,44 +236,46 @@ pub unsafe extern "C" fn lxmf_beacon_rpc(
     method: *const c_char,
     params_json: *const c_char,
 ) -> i64 {
-    if dest_hash_hex.is_null() || method.is_null() { return -1; }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if dest_hash_hex.is_null() || method.is_null() { return -1i64; }
 
-    let dest_str = match CStr::from_ptr(dest_hash_hex).to_str() { Ok(s) => s, Err(_) => return -1 };
-    let method_str = match CStr::from_ptr(method).to_str() { Ok(s) => s, Err(_) => return -1 };
-    let params_str = if params_json.is_null() {
-        "[]"
-    } else {
-        match CStr::from_ptr(params_json).to_str() { Ok(s) => s, Err(_) => return -1 }
-    };
+        let dest_str = match CStr::from_ptr(dest_hash_hex).to_str() { Ok(s) => s, Err(_) => return -1 };
+        let method_str = match CStr::from_ptr(method).to_str() { Ok(s) => s, Err(_) => return -1 };
+        let params_str = if params_json.is_null() {
+            "[]"
+        } else {
+            match CStr::from_ptr(params_json).to_str() { Ok(s) => s, Err(_) => return -1 }
+        };
 
-    let dest_bytes = match hex::decode(dest_str) {
-        Ok(b) if b.len() == 16 => b,
-        _ => return -1,
-    };
-    let mut dest: crate::node::DestHash = [0u8; 16];
-    dest.copy_from_slice(&dest_bytes);
+        let dest_bytes = match hex::decode(dest_str) {
+            Ok(b) if b.len() == 16 => b,
+            _ => return -1,
+        };
+        let mut dest: crate::node::DestHash = [0u8; 16];
+        dest.copy_from_slice(&dest_bytes);
 
-    let params: serde_json::Value = match serde_json::from_str(params_str) {
-        Ok(v) => v,
-        Err(_) => return -1,
-    };
+        let params: serde_json::Value = match serde_json::from_str(params_str) {
+            Ok(v) => v,
+            Err(_) => return -1,
+        };
 
-    let guard = match crate::node::LxmfNode::global().lock() {
-        Ok(g) => g,
-        Err(_) => return -1,
-    };
-    let node = match guard.as_ref() {
-        Some(n) => n,
-        None => return -1,
-    };
-    let rpc_id = match node.beacon_mgr.lock() {
-        Ok(mut mgr) => mgr.queue_rpc(dest, method_str, params) as i64,
-        Err(_) => -1,
-    };
-    if rpc_id >= 0 {
-        node.rpc_notify.notify_one();
-    }
-    rpc_id
+        let guard = match crate::node::LxmfNode::global().lock() {
+            Ok(g) => g,
+            Err(_) => return -1,
+        };
+        let node = match guard.as_ref() {
+            Some(n) => n,
+            None => return -1,
+        };
+        let rpc_id = match node.beacon_mgr.lock() {
+            Ok(mut mgr) => mgr.queue_rpc(dest, method_str, params) as i64,
+            Err(_) => -1,
+        };
+        if rpc_id >= 0 {
+            node.rpc_notify.notify_one();
+        }
+        rpc_id
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); -1i64 })
 }
 
 // --- Solana tx building ---
@@ -266,60 +317,62 @@ pub unsafe extern "C" fn lxmf_partial_sign_execute_payment(
     out_buf:       *mut u8,
     out_cap:       usize,
 ) -> i32 {
-    if payer_key.is_null() || nonce_bh.is_null() || accounts_json.is_null()
-        || params_json.is_null() || out_buf.is_null() { return -1; }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if payer_key.is_null() || nonce_bh.is_null() || accounts_json.is_null()
+            || params_json.is_null() || out_buf.is_null() { return -1; }
 
-    // Build signing key, zero seed immediately after
-    let seed_slice = std::slice::from_raw_parts(payer_key, 32);
-    let mut seed: [u8; 32] = match seed_slice.try_into() { Ok(s) => s, Err(_) => return -1 };
-    let keypair = ed25519_dalek::SigningKey::from_bytes(&seed);
-    seed.zeroize();
+        // Build signing key, zero seed immediately after
+        let seed_slice = std::slice::from_raw_parts(payer_key, 32);
+        let mut seed: [u8; 32] = match seed_slice.try_into() { Ok(s) => s, Err(_) => return -1 };
+        let keypair = ed25519_dalek::SigningKey::from_bytes(&seed);
+        seed.zeroize();
 
-    // Parse nonce blockhash
-    let nonce_slice = std::slice::from_raw_parts(nonce_bh, 32);
-    let nonce_blockhash: [u8; 32] = match nonce_slice.try_into() { Ok(b) => b, Err(_) => return -1 };
+        // Parse nonce blockhash
+        let nonce_slice = std::slice::from_raw_parts(nonce_bh, 32);
+        let nonce_blockhash: [u8; 32] = match nonce_slice.try_into() { Ok(b) => b, Err(_) => return -1 };
 
-    // Read program_id from BeaconConfig — must be set once via lxmf_set_program_id
-    let program_id: [u8; 32] = {
-        let guard = match LxmfNode::global().lock() { Ok(g) => g, Err(_) => return -1 };
-        let node = match guard.as_ref() { Some(n) => n, None => return -1 };
-        let cfg = match node.beacon_config.lock() { Ok(c) => c, Err(_) => return -1 };
-        match cfg.program_id { Some(p) => p, None => return -1 }
-    };
+        // Read program_id from BeaconConfig — must be set once via lxmf_set_program_id
+        let program_id: [u8; 32] = {
+            let guard = match LxmfNode::global().lock() { Ok(g) => g, Err(_) => return -1 };
+            let node = match guard.as_ref() { Some(n) => n, None => return -1 };
+            let cfg = match node.beacon_config.lock() { Ok(c) => c, Err(_) => return -1 };
+            match cfg.program_id { Some(p) => p, None => return -1 }
+        };
 
-    // Parse accounts JSON
-    let accts_str = match CStr::from_ptr(accounts_json).to_str() { Ok(s) => s, Err(_) => return -1 };
-    let accts: AccountsJson = match serde_json::from_str(accts_str) { Ok(a) => a, Err(_) => return -1 };
-    let accounts = crate::solana_tx::ExecutePaymentAccounts {
-        payer:          match hex32(&accts.payer)          { Some(b) => b, None => return -1 },
-        broadcaster:    match hex32(&accts.broadcaster)    { Some(b) => b, None => return -1 },
-        nonce_account:  match hex32(&accts.nonce_account)  { Some(b) => b, None => return -1 },
-        payer_ata:      match hex32(&accts.payer_ata)      { Some(b) => b, None => return -1 },
-        recipient:      match hex32(&accts.recipient)      { Some(b) => b, None => return -1 },
-        recipient_ata:  match hex32(&accts.recipient_ata)  { Some(b) => b, None => return -1 },
-        broadcaster_ata:match hex32(&accts.broadcaster_ata){ Some(b) => b, None => return -1 },
-        mint:           match hex32(&accts.mint)           { Some(b) => b, None => return -1 },
-        program_id,
-    };
+        // Parse accounts JSON
+        let accts_str = match CStr::from_ptr(accounts_json).to_str() { Ok(s) => s, Err(_) => return -1 };
+        let accts: AccountsJson = match serde_json::from_str(accts_str) { Ok(a) => a, Err(_) => return -1 };
+        let accounts = crate::solana_tx::ExecutePaymentAccounts {
+            payer:          match hex32(&accts.payer)          { Some(b) => b, None => return -1 },
+            broadcaster:    match hex32(&accts.broadcaster)    { Some(b) => b, None => return -1 },
+            nonce_account:  match hex32(&accts.nonce_account)  { Some(b) => b, None => return -1 },
+            payer_ata:      match hex32(&accts.payer_ata)      { Some(b) => b, None => return -1 },
+            recipient:      match hex32(&accts.recipient)      { Some(b) => b, None => return -1 },
+            recipient_ata:  match hex32(&accts.recipient_ata)  { Some(b) => b, None => return -1 },
+            broadcaster_ata:match hex32(&accts.broadcaster_ata){ Some(b) => b, None => return -1 },
+            mint:           match hex32(&accts.mint)           { Some(b) => b, None => return -1 },
+            program_id,
+        };
 
-    // Parse params JSON
-    let prms_str = match CStr::from_ptr(params_json).to_str() { Ok(s) => s, Err(_) => return -1 };
-    let prms: ParamsJson = match serde_json::from_str(prms_str) { Ok(p) => p, Err(_) => return -1 };
-    let enc_amt: [u8; 32] = match hex32(&prms.encrypted_amount) { Some(b) => b, None => return -1 };
-    let nonce_u128: u128 = match prms.nonce.parse() { Ok(n) => n, Err(_) => return -1 };
-    let params = crate::solana_tx::ExecutePaymentParams {
-        comp_offset:        prms.comp_offset,
-        amount:             prms.amount,
-        encrypted_amount:   enc_amt,
-        nonce:              nonce_u128,
-        encryption_pub_key: match hex32(&prms.encryption_pub_key) { Some(b) => b, None => return -1 },
-    };
+        // Parse params JSON
+        let prms_str = match CStr::from_ptr(params_json).to_str() { Ok(s) => s, Err(_) => return -1 };
+        let prms: ParamsJson = match serde_json::from_str(prms_str) { Ok(p) => p, Err(_) => return -1 };
+        let enc_amt: [u8; 32] = match hex32(&prms.encrypted_amount) { Some(b) => b, None => return -1 };
+        let nonce_u128: u128 = match prms.nonce.parse() { Ok(n) => n, Err(_) => return -1 };
+        let params = crate::solana_tx::ExecutePaymentParams {
+            comp_offset:        prms.comp_offset,
+            amount:             prms.amount,
+            encrypted_amount:   enc_amt,
+            nonce:              nonce_u128,
+            encryption_pub_key: match hex32(&prms.encryption_pub_key) { Some(b) => b, None => return -1 },
+        };
 
-    let tx_b64 = crate::solana_tx::partial_sign_execute_payment(&keypair, nonce_blockhash, &accounts, &params);
-    let bytes = tx_b64.as_bytes();
-    if bytes.len() > out_cap { return -1; }
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
-    bytes.len() as i32
+        let tx_b64 = crate::solana_tx::partial_sign_execute_payment(&keypair, nonce_blockhash, &accounts, &params);
+        let bytes = tx_b64.as_bytes();
+        if bytes.len() > out_cap { return -1; }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
+        bytes.len() as i32
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); -1 })
 }
 
 /// Sign payer slot 0 of a Solana tx already in serialized wire-format base64.
@@ -335,25 +388,27 @@ pub unsafe extern "C" fn lxmf_sign_tx(
     out_buf: *mut u8,
     out_cap: usize,
 ) -> i32 {
-    if payer_key.is_null() || tx_b64.is_null() || out_buf.is_null() { return -1; }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if payer_key.is_null() || tx_b64.is_null() || out_buf.is_null() { return -1; }
 
-    let seed_slice = std::slice::from_raw_parts(payer_key, 32);
-    let mut seed: [u8; 32] = match seed_slice.try_into() { Ok(s) => s, Err(_) => return -1 };
-    let keypair = ed25519_dalek::SigningKey::from_bytes(&seed);
-    seed.zeroize(); // zero raw seed immediately; SigningKey zeroes itself on drop
+        let seed_slice = std::slice::from_raw_parts(payer_key, 32);
+        let mut seed: [u8; 32] = match seed_slice.try_into() { Ok(s) => s, Err(_) => return -1 };
+        let keypair = ed25519_dalek::SigningKey::from_bytes(&seed);
+        seed.zeroize(); // zero raw seed immediately; SigningKey zeroes itself on drop
 
-    let b64_str = match CStr::from_ptr(tx_b64).to_str() { Ok(s) => s, Err(_) => return -1 };
-    let tx_bytes = match base64::engine::general_purpose::STANDARD.decode(b64_str) {
-        Ok(b) => b,
-        Err(_) => return -1,
-    };
+        let b64_str = match CStr::from_ptr(tx_b64).to_str() { Ok(s) => s, Err(_) => return -1 };
+        let tx_bytes = match base64::engine::general_purpose::STANDARD.decode(b64_str) {
+            Ok(b) => b,
+            Err(_) => return -1,
+        };
 
-    let signed = crate::solana_tx::sign_tx_at_slot(&tx_bytes, &keypair, 0);
-    let result = base64::engine::general_purpose::STANDARD.encode(&signed);
-    let bytes = result.as_bytes();
-    if bytes.len() > out_cap { return -1; }
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
-    bytes.len() as i32
+        let signed = crate::solana_tx::sign_tx_at_slot(&tx_bytes, &keypair, 0);
+        let result = base64::engine::general_purpose::STANDARD.encode(&signed);
+        let bytes = result.as_bytes();
+        if bytes.len() > out_cap { return -1; }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
+        bytes.len() as i32
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); -1 })
 }
 
 /// Parse the 32-byte durable nonce blockhash from a nonce account's base64 data field.
@@ -364,14 +419,16 @@ pub unsafe extern "C" fn lxmf_extract_nonce_blockhash(
     out_buf:          *mut u8,
     out_cap:          usize,
 ) -> i32 {
-    if account_data_b64.is_null() || out_buf.is_null() { return -1; }
-    let s = match CStr::from_ptr(account_data_b64).to_str() { Ok(s) => s, Err(_) => return -1 };
-    let nonce = match crate::solana_tx::extract_nonce_blockhash(s) { Some(n) => n, None => return -1 };
-    let hex_str = hex::encode(nonce);
-    let bytes = hex_str.as_bytes();
-    if bytes.len() > out_cap { return -1; }
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
-    bytes.len() as i32
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if account_data_b64.is_null() || out_buf.is_null() { return -1; }
+        let s = match CStr::from_ptr(account_data_b64).to_str() { Ok(s) => s, Err(_) => return -1 };
+        let nonce = match crate::solana_tx::extract_nonce_blockhash(s) { Some(n) => n, None => return -1 };
+        let hex_str = hex::encode(nonce);
+        let bytes = hex_str.as_bytes();
+        if bytes.len() > out_cap { return -1; }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
+        bytes.len() as i32
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); -1 })
 }
 
 // --- Beacon configuration ---
@@ -381,86 +438,91 @@ pub unsafe extern "C" fn lxmf_extract_nonce_blockhash(
 /// Returns 0 on success, -1 on error.
 #[no_mangle]
 pub unsafe extern "C" fn lxmf_beacon_set_keypair(key_bytes: *const u8, len: i32) -> i32 {
-    if key_bytes.is_null() || (len != 32 && len != 64) { return -1; }
-    let seed_bytes: &[u8] = std::slice::from_raw_parts(key_bytes, 32);
-    let mut seed: [u8; 32] = match seed_bytes.try_into() {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
-    let keypair = ed25519_dalek::SigningKey::from_bytes(&seed);
-    seed.zeroize();
-    let beacon_config = {
-        let guard = match crate::node::LxmfNode::global().lock() {
-            Ok(g) => g,
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if key_bytes.is_null() || (len != 32 && len != 64) { return -1; }
+        let seed_bytes: &[u8] = std::slice::from_raw_parts(key_bytes, 32);
+        let mut seed: [u8; 32] = match seed_bytes.try_into() {
+            Ok(s) => s,
             Err(_) => return -1,
         };
-        match guard.as_ref() {
-            Some(n) => std::sync::Arc::clone(&n.beacon_config),
-            None => return -1,
-        }
-    };
-    let rc = {
-        match beacon_config.lock() {
-            Ok(mut cfg) => { cfg.keypair = Some(keypair); 0i32 }
-            Err(_) => -1i32,
-        }
-    };
-    rc
+        let keypair = ed25519_dalek::SigningKey::from_bytes(&seed);
+        seed.zeroize();
+        let beacon_config = {
+            let guard = match crate::node::LxmfNode::global().lock() {
+                Ok(g) => g,
+                Err(_) => return -1,
+            };
+            match guard.as_ref() {
+                Some(n) => std::sync::Arc::clone(&n.beacon_config),
+                None => return -1,
+            }
+        };
+        let rc = {
+            match beacon_config.lock() {
+                Ok(mut cfg) => { cfg.keypair = Some(keypair); 0i32 }
+                Err(_) => -1i32,
+            }
+        };
+        rc
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); -1 })
 }
 
 /// Set the Solana RPC URL the beacon uses for cosign submissions and proxied calls.
 /// Returns 0 on success, -1 on error.
 #[no_mangle]
 pub unsafe extern "C" fn lxmf_beacon_set_solana_rpc_url(url: *const std::ffi::c_char) -> i32 {
-    if url.is_null() { return -1; }
-    let url_str = match std::ffi::CStr::from_ptr(url).to_str() {
-        Ok(s) => s.to_owned(),
-        Err(_) => return -1,
-    };
-    let beacon_config = {
-        let guard = match crate::node::LxmfNode::global().lock() {
-            Ok(g) => g,
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if url.is_null() { return -1; }
+        let url_str = match std::ffi::CStr::from_ptr(url).to_str() {
+            Ok(s) => s.to_owned(),
             Err(_) => return -1,
         };
-        match guard.as_ref() {
-            Some(n) => std::sync::Arc::clone(&n.beacon_config),
-            None => return -1,
-        }
-    };
-    let rc = {
-        match beacon_config.lock() {
-            Ok(mut cfg) => { cfg.solana_rpc_url = Some(url_str); 0i32 }
-            Err(_) => -1i32,
-        }
-    };
-    rc
+        let beacon_config = {
+            let guard = match crate::node::LxmfNode::global().lock() {
+                Ok(g) => g,
+                Err(_) => return -1,
+            };
+            match guard.as_ref() {
+                Some(n) => std::sync::Arc::clone(&n.beacon_config),
+                None => return -1,
+            }
+        };
+        let rc = {
+            match beacon_config.lock() {
+                Ok(mut cfg) => { cfg.solana_rpc_url = Some(url_str); 0i32 }
+                Err(_) => -1i32,
+            }
+        };
+        rc
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); -1 })
 }
 
 /// Enable or disable propagation node mode (store-and-forward relay) for Mode 3 TCP.
 /// Must be called before start(). Returns 0 on success, -1 on error.
 #[no_mangle]
 pub unsafe extern "C" fn lxmf_set_propagation_node(enable: u8) -> i32 {
-    let mut guard = match LxmfNode::global().lock() {
-        Ok(g) => g,
-        Err(_) => return -1,
-    };
-    match guard.as_mut() {
-        Some(n) => { n.propagation_node = enable != 0; 0 }
-        None => -1,
-    }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut guard = match LxmfNode::global().lock() {
+            Ok(g) => g,
+            Err(_) => return -1,
+        };
+        match guard.as_mut() {
+            Some(n) => { n.propagation_node = enable != 0; 0 }
+            None => -1,
+        }
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); -1 })
 }
 
 /// Request an immediate message sync from connected propagation relays.
 /// Returns 0 (stub — sync is handled automatically by the transport layer).
 #[no_mangle]
 pub unsafe extern "C" fn lxmf_sync_propagation() -> i32 {
-    // reticulum-rs-transport handles propagation relay sync automatically;
-    // this entry point exists for apps that want to trigger an explicit pull.
-    // No-op for now — returns success so callers don't need to guard.
-    if LxmfNode::global().lock().ok().and_then(|g| g.as_ref().map(|_| ())).is_none() {
-        return -1;
-    }
-    STATUS_OK
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if LxmfNode::global().lock().ok().and_then(|g| g.as_ref().map(|_| ())).is_none() {
+            return -1;
+        }
+        STATUS_OK
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); -1 })
 }
 
 /// Store the ble_revshare Anchor program address (deployment-specific: devnet vs mainnet).
@@ -468,43 +530,47 @@ pub unsafe extern "C" fn lxmf_sync_propagation() -> i32 {
 /// Returns 0 on success, -1 on error (null, wrong length, not initialized).
 #[no_mangle]
 pub unsafe extern "C" fn lxmf_set_program_id(program_id_hex: *const c_char) -> i32 {
-    if program_id_hex.is_null() { return -1; }
-    let hex_str = match CStr::from_ptr(program_id_hex).to_str() { Ok(s) => s, Err(_) => return -1 };
-    let pid: [u8; 32] = match hex32(hex_str) { Some(b) => b, None => return -1 };
-    let beacon_config = {
-        let guard = match LxmfNode::global().lock() { Ok(g) => g, Err(_) => return -1 };
-        match guard.as_ref() {
-            Some(n) => std::sync::Arc::clone(&n.beacon_config),
-            None => return -1,
-        }
-    };
-    let rc = match beacon_config.lock() {
-        Ok(mut cfg) => { cfg.program_id = Some(pid); 0i32 }
-        Err(_) => -1i32,
-    };
-    rc
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if program_id_hex.is_null() { return -1; }
+        let hex_str = match CStr::from_ptr(program_id_hex).to_str() { Ok(s) => s, Err(_) => return -1 };
+        let pid: [u8; 32] = match hex32(hex_str) { Some(b) => b, None => return -1 };
+        let beacon_config = {
+            let guard = match LxmfNode::global().lock() { Ok(g) => g, Err(_) => return -1 };
+            match guard.as_ref() {
+                Some(n) => std::sync::Arc::clone(&n.beacon_config),
+                None => return -1,
+            }
+        };
+        let rc = match beacon_config.lock() {
+            Ok(mut cfg) => { cfg.program_id = Some(pid); 0i32 }
+            Err(_) => -1i32,
+        };
+        rc
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); -1 })
 }
 
 /// Retrieve the currently stored program address as 64-char lowercase hex.
 /// `out_buf` must be at least 64 bytes. Returns 64 on success, -1 if not set or error.
 #[no_mangle]
 pub unsafe extern "C" fn lxmf_get_program_id(out_buf: *mut u8, out_cap: usize) -> i32 {
-    if out_buf.is_null() || out_cap < 64 { return -1; }
-    let beacon_config = {
-        let guard = match LxmfNode::global().lock() { Ok(g) => g, Err(_) => return -1 };
-        match guard.as_ref() {
-            Some(n) => std::sync::Arc::clone(&n.beacon_config),
-            None => return -1,
-        }
-    };
-    let pid = match beacon_config.lock() {
-        Ok(cfg) => match cfg.program_id { Some(p) => p, None => return -1 },
-        Err(_) => return -1,
-    };
-    let hex_str = hex::encode(pid);
-    let bytes = hex_str.as_bytes();
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, 64);
-    64
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if out_buf.is_null() || out_cap < 64 { return -1; }
+        let beacon_config = {
+            let guard = match LxmfNode::global().lock() { Ok(g) => g, Err(_) => return -1 };
+            match guard.as_ref() {
+                Some(n) => std::sync::Arc::clone(&n.beacon_config),
+                None => return -1,
+            }
+        };
+        let pid = match beacon_config.lock() {
+            Ok(cfg) => match cfg.program_id { Some(p) => p, None => return -1 },
+            Err(_) => return -1,
+        };
+        let hex_str = hex::encode(pid);
+        let bytes = hex_str.as_bytes();
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, 64);
+        64
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); -1 })
 }
 
 // --- Messages ---
@@ -515,23 +581,25 @@ pub unsafe extern "C" fn lxmf_fetch_messages(
     out_buf: *mut u8,
     out_capacity: usize,
 ) -> i32 {
-    let guard = match LxmfNode::global().lock() {
-        Ok(g) => g,
-        Err(_) => return STATUS_ERR,
-    };
-    let node = match guard.as_ref() {
-        Some(n) => n,
-        None => return STATUS_NOT_INIT,
-    };
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let guard = match LxmfNode::global().lock() {
+            Ok(g) => g,
+            Err(_) => return STATUS_ERR,
+        };
+        let node = match guard.as_ref() {
+            Some(n) => n,
+            None => return STATUS_NOT_INIT,
+        };
 
-    let json = match &node.store {
-        Some(store) => store.fetch_messages(limit).unwrap_or_else(|_| "[]".into()),
-        None => "[]".into(),
-    };
-    let bytes = json.as_bytes();
-    if bytes.len() > out_capacity { return STATUS_ERR; }
-    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
-    bytes.len() as i32
+        let json = match &node.store {
+            Some(store) => store.fetch_messages(limit).unwrap_or_else(|_| "[]".into()),
+            None => "[]".into(),
+        };
+        let bytes = json.as_bytes();
+        if bytes.len() > out_capacity { return STATUS_ERR; }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_buf, bytes.len());
+        bytes.len() as i32
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); STATUS_ERR })
 }
 
 // --- Messaging ---
@@ -550,23 +618,25 @@ pub unsafe extern "C" fn lxmf_send(
     body_len: usize,
     fields_json: *const c_char,
 ) -> i64 {
-    if dest_ptr.is_null() || body_ptr.is_null() { return -1; }
-    if body_len > 65536 { return -1; }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if dest_ptr.is_null() || body_ptr.is_null() { return -1i64; }
+        if body_len > 65536 { return -1; }
 
-    let dest_bytes = slice::from_raw_parts(dest_ptr, 16);
-    let dest_hex = hex::encode(dest_bytes);
-    let body = slice::from_raw_parts(body_ptr, body_len);
-    let media = if fields_json.is_null() { None } else {
-        CStr::from_ptr(fields_json).to_str().ok()
-    };
+        let dest_bytes = slice::from_raw_parts(dest_ptr, 16);
+        let dest_hex = hex::encode(dest_bytes);
+        let body = slice::from_raw_parts(body_ptr, body_len);
+        let media = if fields_json.is_null() { None } else {
+            CStr::from_ptr(fields_json).to_str().ok()
+        };
 
-    match LxmfNode::send_to(&dest_hex, body, media) {
-        Ok(seq) => seq as i64,
-        Err(e) => {
-            warn!("lxmf_send failed: {}", e);
-            -1
+        match LxmfNode::send_to(&dest_hex, body, media) {
+            Ok(seq) => seq as i64,
+            Err(e) => {
+                warn!("lxmf_send failed: {}", e);
+                -1
+            }
         }
-    }
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); -1i64 })
 }
 
 /// Broadcast an LXMF message to multiple destinations.
@@ -585,24 +655,26 @@ pub unsafe extern "C" fn lxmf_broadcast(
     body_len: usize,
     fields_json: *const c_char,
 ) -> i64 {
-    if dests_ptr.is_null() || body_ptr.is_null() { return -1; }
-    if dest_count == 0 { return 0; }
-    if body_len > 65536 { return -1; }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if dests_ptr.is_null() || body_ptr.is_null() { return -1i64; }
+        if dest_count == 0 { return 0; }
+        if body_len > 65536 { return -1; }
 
-    let dests = slice::from_raw_parts(dests_ptr, dest_count * 16);
-    let body = slice::from_raw_parts(body_ptr, body_len);
-    let media = if fields_json.is_null() { None } else {
-        CStr::from_ptr(fields_json).to_str().ok()
-    };
+        let dests = slice::from_raw_parts(dests_ptr, dest_count * 16);
+        let body = slice::from_raw_parts(body_ptr, body_len);
+        let media = if fields_json.is_null() { None } else {
+            CStr::from_ptr(fields_json).to_str().ok()
+        };
 
-    let mut sent: i64 = 0;
-    for i in 0..dest_count {
-        let dest_hex = hex::encode(&dests[i * 16..(i + 1) * 16]);
-        if LxmfNode::send_to(&dest_hex, body, media).is_ok() {
-            sent += 1;
+        let mut sent: i64 = 0;
+        for i in 0..dest_count {
+            let dest_hex = hex::encode(&dests[i * 16..(i + 1) * 16]);
+            if LxmfNode::send_to(&dest_hex, body, media).is_ok() {
+                sent += 1;
+            }
         }
-    }
-    sent
+        sent
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); -1i64 })
 }
 
 // --- Group Chat ---
@@ -617,25 +689,27 @@ pub unsafe extern "C" fn lxmf_create_group(
     out_addr_buf: *mut u8,
     out_addr_len: usize,
 ) -> i32 {
-    if name_ptr.is_null() || key_hex_ptr.is_null() || out_addr_buf.is_null() { return STATUS_ERR; }
-    let name = match CStr::from_ptr(name_ptr).to_str() {
-        Ok(s) => s,
-        Err(_) => return STATUS_ERR,
-    };
-    let key_hex = match CStr::from_ptr(key_hex_ptr).to_str() {
-        Ok(s) => s,
-        Err(_) => return STATUS_ERR,
-    };
-    match LxmfNode::create_group(name, key_hex) {
-        Ok(addr_hex) => {
-            let bytes = addr_hex.as_bytes();
-            let copy_len = bytes.len().min(out_addr_len.saturating_sub(1));
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_addr_buf, copy_len);
-            *out_addr_buf.add(copy_len) = 0; // null-terminate
-            STATUS_OK
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if name_ptr.is_null() || key_hex_ptr.is_null() || out_addr_buf.is_null() { return STATUS_ERR; }
+        let name = match CStr::from_ptr(name_ptr).to_str() {
+            Ok(s) => s,
+            Err(_) => return STATUS_ERR,
+        };
+        let key_hex = match CStr::from_ptr(key_hex_ptr).to_str() {
+            Ok(s) => s,
+            Err(_) => return STATUS_ERR,
+        };
+        match LxmfNode::create_group(name, key_hex) {
+            Ok(addr_hex) => {
+                let bytes = addr_hex.as_bytes();
+                let copy_len = bytes.len().min(out_addr_len.saturating_sub(1));
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), out_addr_buf, copy_len);
+                *out_addr_buf.add(copy_len) = 0; // null-terminate
+                STATUS_OK
+            }
+            Err(e) => { error!("lxmf_create_group: {e}"); STATUS_ERR }
         }
-        Err(e) => { error!("lxmf_create_group: {e}"); STATUS_ERR }
-    }
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); STATUS_ERR })
 }
 
 /// Join a group by its pre-known address hex + shared key hex.
@@ -644,33 +718,37 @@ pub unsafe extern "C" fn lxmf_join_group(
     addr_hex_ptr: *const c_char,
     key_hex_ptr: *const c_char,
 ) -> i32 {
-    if addr_hex_ptr.is_null() || key_hex_ptr.is_null() { return STATUS_ERR; }
-    let addr_hex = match CStr::from_ptr(addr_hex_ptr).to_str() {
-        Ok(s) => s,
-        Err(_) => return STATUS_ERR,
-    };
-    let key_hex = match CStr::from_ptr(key_hex_ptr).to_str() {
-        Ok(s) => s,
-        Err(_) => return STATUS_ERR,
-    };
-    match LxmfNode::join_group(addr_hex, key_hex) {
-        Ok(()) => STATUS_OK,
-        Err(e) => { error!("lxmf_join_group: {e}"); STATUS_ERR }
-    }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if addr_hex_ptr.is_null() || key_hex_ptr.is_null() { return STATUS_ERR; }
+        let addr_hex = match CStr::from_ptr(addr_hex_ptr).to_str() {
+            Ok(s) => s,
+            Err(_) => return STATUS_ERR,
+        };
+        let key_hex = match CStr::from_ptr(key_hex_ptr).to_str() {
+            Ok(s) => s,
+            Err(_) => return STATUS_ERR,
+        };
+        match LxmfNode::join_group(addr_hex, key_hex) {
+            Ok(()) => STATUS_OK,
+            Err(e) => { error!("lxmf_join_group: {e}"); STATUS_ERR }
+        }
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); STATUS_ERR })
 }
 
 /// Leave a group — stop receiving its messages.
 #[no_mangle]
 pub unsafe extern "C" fn lxmf_leave_group(addr_hex_ptr: *const c_char) -> i32 {
-    if addr_hex_ptr.is_null() { return STATUS_ERR; }
-    let addr_hex = match CStr::from_ptr(addr_hex_ptr).to_str() {
-        Ok(s) => s,
-        Err(_) => return STATUS_ERR,
-    };
-    match LxmfNode::leave_group(addr_hex) {
-        Ok(()) => STATUS_OK,
-        Err(e) => { error!("lxmf_leave_group: {e}"); STATUS_ERR }
-    }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if addr_hex_ptr.is_null() { return STATUS_ERR; }
+        let addr_hex = match CStr::from_ptr(addr_hex_ptr).to_str() {
+            Ok(s) => s,
+            Err(_) => return STATUS_ERR,
+        };
+        match LxmfNode::leave_group(addr_hex) {
+            Ok(()) => STATUS_OK,
+            Err(e) => { error!("lxmf_leave_group: {e}"); STATUS_ERR }
+        }
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); STATUS_ERR })
 }
 
 /// Send a message to a group channel.
@@ -683,31 +761,39 @@ pub unsafe extern "C" fn lxmf_send_group(
     body_len: usize,
     fields_json: *const c_char,
 ) -> i64 {
-    if addr_hex_ptr.is_null() || body_ptr.is_null() { return -1; }
-    let addr_hex = match CStr::from_ptr(addr_hex_ptr).to_str() {
-        Ok(s) => s,
-        Err(_) => return -1,
-    };
-    let body = slice::from_raw_parts(body_ptr, body_len);
-    let media = if fields_json.is_null() { None } else {
-        CStr::from_ptr(fields_json).to_str().ok()
-    };
-    match LxmfNode::send_group(addr_hex, body, media) {
-        Ok(seq) => seq as i64,
-        Err(e) => { error!("lxmf_send_group: {e}"); -1 }
-    }
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if addr_hex_ptr.is_null() || body_ptr.is_null() { return -1i64; }
+        let addr_hex = match CStr::from_ptr(addr_hex_ptr).to_str() {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+        let body = slice::from_raw_parts(body_ptr, body_len);
+        let media = if fields_json.is_null() { None } else {
+            CStr::from_ptr(fields_json).to_str().ok()
+        };
+        match LxmfNode::send_group(addr_hex, body, media) {
+            Ok(seq) => seq as i64,
+            Err(e) => { error!("lxmf_send_group: {e}"); -1 }
+        }
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); -1i64 })
 }
 
 // --- Config ---
 
 #[no_mangle]
 pub unsafe extern "C" fn lxmf_set_log_level(level: u32) -> i32 {
-    crate::log_bridge::set_max_level_from_u32(level);
-    STATUS_OK
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::log_bridge::set_max_level_from_u32(level);
+        STATUS_OK
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); STATUS_ERR })
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn lxmf_abi_version() -> u32 { LxmfNode::abi_version() }
+pub unsafe extern "C" fn lxmf_abi_version() -> u32 {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        LxmfNode::abi_version()
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); 0u32 })
+}
 
 // --- BLE Interface (iOS C FFI) ---
 //
@@ -725,13 +811,15 @@ pub unsafe extern "C" fn lxmf_ble_receive(
     data: *const u8,
     data_len: usize,
 ) -> i32 {
-    if peer_addr.is_null() || data.is_null() { return STATUS_ERR; }
-    if data_len == 0 || data_len > 4096 { return STATUS_ERR; }
-    let mut addr = [0u8; 6];
-    addr.copy_from_slice(slice::from_raw_parts(peer_addr, 6));
-    let bytes = slice::from_raw_parts(data, data_len).to_vec();
-    crate::ble_iface::on_ble_rx(addr, bytes);
-    STATUS_OK
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if peer_addr.is_null() || data.is_null() { return STATUS_ERR; }
+        if data_len == 0 || data_len > 4096 { return STATUS_ERR; }
+        let mut addr = [0u8; 6];
+        addr.copy_from_slice(slice::from_raw_parts(peer_addr, 6));
+        let bytes = slice::from_raw_parts(data, data_len).to_vec();
+        crate::ble_iface::on_ble_rx(addr, bytes);
+        STATUS_OK
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); STATUS_ERR })
 }
 
 /// Dequeue the next outbound BLE frame from the Rust transport engine.
@@ -747,16 +835,18 @@ pub unsafe extern "C" fn lxmf_ble_poll_tx(
     out_data: *mut u8,
     out_capacity: usize,
 ) -> i32 {
-    if out_peer.is_null() || out_data.is_null() { return STATUS_ERR; }
-    match crate::ble_iface::next_ble_tx() {
-        Some(frame) => {
-            if frame.data.len() > out_capacity { return STATUS_ERR; }
-            std::ptr::copy_nonoverlapping(frame.peer_addr.as_ptr(), out_peer, 6);
-            std::ptr::copy_nonoverlapping(frame.data.as_ptr(), out_data, frame.data.len());
-            frame.data.len() as i32
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if out_peer.is_null() || out_data.is_null() { return STATUS_ERR; }
+        match crate::ble_iface::next_ble_tx() {
+            Some(frame) => {
+                if frame.data.len() > out_capacity { return STATUS_ERR; }
+                std::ptr::copy_nonoverlapping(frame.peer_addr.as_ptr(), out_peer, 6);
+                std::ptr::copy_nonoverlapping(frame.data.as_ptr(), out_data, frame.data.len());
+                frame.data.len() as i32
+            }
+            None => 0,
         }
-        None => 0,
-    }
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); STATUS_ERR })
 }
 
 /// Notify Rust that a BLE peer has connected.
@@ -764,11 +854,13 @@ pub unsafe extern "C" fn lxmf_ble_poll_tx(
 /// `peer_addr` — pointer to 6-byte peer address.
 #[no_mangle]
 pub unsafe extern "C" fn lxmf_ble_connected(peer_addr: *const u8) -> i32 {
-    if peer_addr.is_null() { return STATUS_ERR; }
-    let mut addr = [0u8; 6];
-    addr.copy_from_slice(slice::from_raw_parts(peer_addr, 6));
-    crate::ble_iface::on_ble_connected(addr);
-    STATUS_OK
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if peer_addr.is_null() { return STATUS_ERR; }
+        let mut addr = [0u8; 6];
+        addr.copy_from_slice(slice::from_raw_parts(peer_addr, 6));
+        crate::ble_iface::on_ble_connected(addr);
+        STATUS_OK
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); STATUS_ERR })
 }
 
 /// Notify Rust that a BLE peer has disconnected.
@@ -776,17 +868,21 @@ pub unsafe extern "C" fn lxmf_ble_connected(peer_addr: *const u8) -> i32 {
 /// `peer_addr` — pointer to 6-byte peer address.
 #[no_mangle]
 pub unsafe extern "C" fn lxmf_ble_disconnected(peer_addr: *const u8) -> i32 {
-    if peer_addr.is_null() { return STATUS_ERR; }
-    let mut addr = [0u8; 6];
-    addr.copy_from_slice(slice::from_raw_parts(peer_addr, 6));
-    crate::ble_iface::on_ble_disconnected(addr);
-    STATUS_OK
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if peer_addr.is_null() { return STATUS_ERR; }
+        let mut addr = [0u8; 6];
+        addr.copy_from_slice(slice::from_raw_parts(peer_addr, 6));
+        crate::ble_iface::on_ble_disconnected(addr);
+        STATUS_OK
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); STATUS_ERR })
 }
 
 /// Returns the number of currently connected BLE peers.
 #[no_mangle]
 pub extern "C" fn lxmf_ble_peer_count() -> i32 {
-    crate::ble_iface::ble_peer_count() as i32
+    std::panic::catch_unwind(|| {
+        crate::ble_iface::ble_peer_count() as i32
+    }).unwrap_or_else(|e| { log_ffi_panic(&e); STATUS_ERR })
 }
 
 /// Notify Rust of the negotiated BLE write limit for a peer.
@@ -797,11 +893,13 @@ pub extern "C" fn lxmf_ble_peer_count() -> i32 {
 ///                 `central.maximumUpdateValueLength`; Android: ATT MTU − 3).
 #[no_mangle]
 pub unsafe extern "C" fn lxmf_ble_mtu_negotiated(peer_addr: *const u8, write_limit: u32) -> i32 {
-    if peer_addr.is_null() { return STATUS_ERR; }
-    let mut addr = [0u8; 6];
-    addr.copy_from_slice(slice::from_raw_parts(peer_addr, 6));
-    crate::ble_iface::on_mtu_negotiated(addr, write_limit as usize);
-    STATUS_OK
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if peer_addr.is_null() { return STATUS_ERR; }
+        let mut addr = [0u8; 6];
+        addr.copy_from_slice(slice::from_raw_parts(peer_addr, 6));
+        crate::ble_iface::on_mtu_negotiated(addr, write_limit as usize);
+        STATUS_OK
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); STATUS_ERR })
 }
 
 // --- NUS Interface (RNode BLE via Nordic UART Service) ---
@@ -821,11 +919,13 @@ pub unsafe extern "C" fn lxmf_nus_receive(
     data: *const u8,
     data_len: usize,
 ) -> i32 {
-    if data.is_null() { return STATUS_ERR; }
-    if data_len == 0 || data_len > 4096 { return STATUS_ERR; }
-    let bytes = slice::from_raw_parts(data, data_len).to_vec();
-    crate::nus_iface::on_nus_rx(bytes);
-    STATUS_OK
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if data.is_null() { return STATUS_ERR; }
+        if data_len == 0 || data_len > 4096 { return STATUS_ERR; }
+        let bytes = slice::from_raw_parts(data, data_len).to_vec();
+        crate::nus_iface::on_nus_rx(bytes);
+        STATUS_OK
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); STATUS_ERR })
 }
 
 /// Dequeue the next KISS-framed bytes to write to the RNode's NUS TX char.
@@ -839,15 +939,17 @@ pub unsafe extern "C" fn lxmf_nus_poll_tx(
     out_data: *mut u8,
     out_capacity: usize,
 ) -> i32 {
-    if out_data.is_null() { return STATUS_ERR; }
-    match crate::nus_iface::next_nus_tx() {
-        Some(frame) => {
-            if frame.len() > out_capacity { return STATUS_ERR; }
-            std::ptr::copy_nonoverlapping(frame.as_ptr(), out_data, frame.len());
-            frame.len() as i32
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if out_data.is_null() { return STATUS_ERR; }
+        match crate::nus_iface::next_nus_tx() {
+            Some(frame) => {
+                if frame.len() > out_capacity { return STATUS_ERR; }
+                std::ptr::copy_nonoverlapping(frame.as_ptr(), out_data, frame.len());
+                frame.len() as i32
+            }
+            None => 0,
         }
-        None => 0,
-    }
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); STATUS_ERR })
 }
 
 // --- Embedded Reticulum Interface (RNodes with embedded Reticulum stack) ---
@@ -862,44 +964,52 @@ pub unsafe extern "C" fn lxmf_embedded_init(
     store_identity: *const u8,
     lxmf_address: *const u8,
 ) -> i32 {
-    if store_identity.is_null() || lxmf_address.is_null() { return STATUS_ERR; }
-    let mut sid = [0u8; 32];
-    let mut addr = [0u8; 16];
-    sid.copy_from_slice(slice::from_raw_parts(store_identity, 32));
-    addr.copy_from_slice(slice::from_raw_parts(lxmf_address, 16));
-    crate::embedded_iface::init_embedded(sid, addr);
-    STATUS_OK
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if store_identity.is_null() || lxmf_address.is_null() { return STATUS_ERR; }
+        let mut sid = [0u8; 32];
+        let mut addr = [0u8; 16];
+        sid.copy_from_slice(slice::from_raw_parts(store_identity, 32));
+        addr.copy_from_slice(slice::from_raw_parts(lxmf_address, 16));
+        crate::embedded_iface::init_embedded(sid, addr);
+        STATUS_OK
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); STATUS_ERR })
 }
 
 /// Push raw PacketFrame bytes received from an embedded-stack RNode via NUS.
 #[no_mangle]
 pub unsafe extern "C" fn lxmf_embedded_receive(data: *const u8, data_len: usize) -> i32 {
-    if data.is_null() { return STATUS_ERR; }
-    if data_len == 0 || data_len > 4096 { return STATUS_ERR; }
-    let bytes = slice::from_raw_parts(data, data_len).to_vec();
-    crate::embedded_iface::on_embedded_rx(bytes);
-    STATUS_OK
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if data.is_null() { return STATUS_ERR; }
+        if data_len == 0 || data_len > 4096 { return STATUS_ERR; }
+        let bytes = slice::from_raw_parts(data, data_len).to_vec();
+        crate::embedded_iface::on_embedded_rx(bytes);
+        STATUS_OK
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); STATUS_ERR })
 }
 
 /// Dequeue the next wire bytes to send to an embedded-stack RNode via NUS.
 /// Returns positive byte count written, 0 if nothing queued, -1 on error.
 #[no_mangle]
 pub unsafe extern "C" fn lxmf_embedded_poll_tx(out_data: *mut u8, out_capacity: usize) -> i32 {
-    if out_data.is_null() { return STATUS_ERR; }
-    match crate::embedded_iface::next_embedded_tx() {
-        Some(frame) => {
-            if frame.len() > out_capacity { return STATUS_ERR; }
-            std::ptr::copy_nonoverlapping(frame.as_ptr(), out_data, frame.len());
-            frame.len() as i32
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if out_data.is_null() { return STATUS_ERR; }
+        match crate::embedded_iface::next_embedded_tx() {
+            Some(frame) => {
+                if frame.len() > out_capacity { return STATUS_ERR; }
+                std::ptr::copy_nonoverlapping(frame.as_ptr(), out_data, frame.len());
+                frame.len() as i32
+            }
+            None => 0,
         }
-        None => 0,
-    }
+    })).unwrap_or_else(|e| { log_ffi_panic(&e); STATUS_ERR })
 }
 
 /// Trigger a manual embedded runtime tick (e.g., from a periodic timer).
 #[no_mangle]
 pub extern "C" fn lxmf_embedded_tick() {
-    crate::embedded_iface::tick();
+    std::panic::catch_unwind(|| {
+        crate::embedded_iface::tick();
+    }).unwrap_or_else(|e| log_ffi_panic(&e));
 }
 
 // --- Internal ---
